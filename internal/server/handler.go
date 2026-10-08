@@ -1112,7 +1112,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//     turnKey；turnKey 空态（无 user 消息/无可签名内容）回落会话级，都空则请求级
 	//     随机——轮转内捕获一次即共享；
 	//   - messageID 在 ChatHeaders 内每条消息生成（消息级独立，无需外部可见）。
-	chatMeta := upstream.ChatMeta{ConversationID: session.ResolveConversationID(body)}
+	// ConversationID passes the client dialog id through. Clients that have none
+	// (Anthropic / Claude Code traffic) fall back to the session key, otherwise
+	// the upstream prompt_cache_key degrades into one constant per account and
+	// every client on that account ends up sharing a single, constantly evicted
+	// prefix-cache slot.
+	convID := session.ResolveConversationID(body)
+	if convID == "" {
+		convID = sessKey
+	}
+	chatMeta := upstream.ChatMeta{ConversationID: convID}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
 	} else if turnKey != "" && sessKey != "" {
