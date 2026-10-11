@@ -28,9 +28,9 @@ func importField(k string) string {
 	switch importKey(k) {
 	case "uid", "userid", "accountid":
 		return "uid"
-	case "accesstoken":
+	case "accesstoken", "at":
 		return "accessToken"
-	case "refreshtoken":
+	case "refreshtoken", "rt":
 		return "refreshToken"
 	case "expiresat", "expireat", "expiration", "expiretime", "expiry":
 		return "expiresAt"
@@ -85,6 +85,14 @@ func importSingleFields(m map[string]any, depth int) (map[string]string, bool, e
 	put := func(k, v string) error {
 		if v == "" {
 			return nil
+		}
+		if k == "realm" {
+			if normalized := importRealmAlias(v); normalized != "" {
+				v = normalized
+			}
+		}
+		if k == "domain" {
+			v = importDomain(v)
 		}
 		if old := fields[k]; old != "" && old != v {
 			return fmt.Errorf("字段 %s 有多个冲突值", k)
@@ -189,8 +197,8 @@ func parseImportRecords(raw []byte) ([]importRecord, error) {
 				if err == nil && !validUID(f["uid"]) {
 					err = fmt.Errorf("uid 含非法字符")
 				}
-				if err == nil && f["realm"] != "" && f["realm"] != "cn" && f["realm"] != "global" {
-					err = fmt.Errorf("realm 仅支持 cn/global")
+				if err == nil {
+					err = normalizeImportRealm(f)
 				}
 				expiry := int64(0)
 				if err == nil {

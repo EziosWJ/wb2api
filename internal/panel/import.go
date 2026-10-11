@@ -82,7 +82,7 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seen[uid] = true
-		realm := a.Realm()
+		realm := auth.ResolveRealm(a.RealmStored(), a.DomainValue())
 		a.FilePath = filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", uid))
 
 		// realm 落盘（global 显式写；cn 走 domain 推断），与面板登录路径同口径。

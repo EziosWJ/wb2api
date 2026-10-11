@@ -594,6 +594,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 最新更新：[v1.9.37：兼容 JSON 导入与每日模型 Token 限额](docs/releases/v1.9.37.md)。账号池每行的「模型用量 / 限额」可分别设置该账号各模型每日上限，如 `100M`；北京时间零点重置，`0` 为不限。
 
+最新修复：[v1.9.38：国际服凭证自动识别与凭证导出](docs/releases/v1.9.38.md)。支持 `realm: intl`、`at/rt`，按 WorkBuddy 域名识别区域；账号行可导出单账号，工具栏可导出全部账号，导出文件可直接重新导入。
+
 ## 🖥️ Web 管理面板
 
 内嵌式管理面板（`internal/panel`，前端 go:embed 单文件打进二进制，无外部构建依赖），服务启动后访问：

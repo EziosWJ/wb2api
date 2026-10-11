@@ -458,6 +458,7 @@ function renderAccounts(list) {
         (s.enterprise ? '' : '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '">签到</button>') +
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '">' + (s.enterprise ? '额度' : '余额') + '</button>' +
         (s.enterprise ? '' : '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>') +
+        '<button class="xs ghost" data-a="export" data-u="' + esc(s.uid) + '" title="下载此账号的登录凭证 JSON，可重新导入">导出凭证</button>' +
         '<button class="xs ghost" data-a="daily" data-u="' + esc(s.uid) + '">模型用量 / 限额</button>' +
         '<button class="xs ghost" data-a="testchat" data-u="' + esc(s.uid) + '" title="用该账号发一条消息，验证模型可用性">测试</button>' +
         // 「解冻」= 清惩罚态（禁用/冷却/熔断/降权），「恢复」= 解除临时停用。两套独立：
@@ -564,6 +565,8 @@ $('accBody').addEventListener('click', async ev => {
     if (a === 'checkin') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/checkin', { method: 'POST' });
       toast('签到完成' + (r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + expiringToast(r) + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok');
+    } else if (a === 'export') {
+      await downloadCredentials('accounts/' + encodeURIComponent(u) + '/export', 'workbuddy-' + u + '.json');
     } else if (a === 'balance') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/balance', { method: 'POST' });
       toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : '') + expiringToast(r), 'ok');
@@ -2991,4 +2994,27 @@ $('dailyQuotaForm').onsubmit = async ev => {
     toast('每日限额已保存，立即生效', 'ok');
   } catch (e) { $('dailyQuotaError').textContent = e.message; $('dailyQuotaError').hidden = false; }
   finally { button.disabled = false; }
+};
+
+
+async function downloadCredentials(path, filename) {
+  const headers = {}, key = localStorage.getItem(LS_KEY);
+  if (key) headers.Authorization = 'Bearer ' + key;
+  const response = await fetch('/panel/api/' + path, { headers, cache: 'no-store' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.error || ('HTTP ' + response.status));
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob), link = document.createElement('a');
+  link.href = url; link.download = filename;
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  toast('凭证已导出，可直接重新导入；请妥善保存文件', 'ok');
+}
+$('btnExportAll').onclick = async () => {
+  const b = $('btnExportAll'); b.disabled = true;
+  try { await downloadCredentials('accounts/export', 'workbuddy-accounts.json'); }
+  catch (e) { toast('导出失败：' + e.message, 'err'); }
+  finally { b.disabled = false; }
 };

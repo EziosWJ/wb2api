@@ -374,29 +374,11 @@ func (a *Auth) SaveAtomic() error {
 	if a.FilePath == "" {
 		return fmt.Errorf("no FilePath set")
 	}
-	doc := map[string]any{
-		"auth": map[string]any{
-			"accessToken":  a.AccessToken,
-			"refreshToken": a.RefreshToken,
-			"expiresAt":    a.ExpiresAt,
-			"domain":       a.Domain,
-			"realm":        a.realm,
-		},
-		"account": map[string]any{
-			"uid":          a.UID,
-			"enterpriseId": a.EnterpriseID,
-			"nickname":     a.Nickname,
-		},
-	}
-	// DeviceToken 非空才写回顶层 device_token：避免在无该字段的旧文件里引入空键
-	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。
-	if a.DeviceToken != "" {
-		doc["device_token"] = a.DeviceToken
-	}
-	raw, err := json.MarshalIndent(doc, "", "  ")
+	raw, err := a.credentialJSONLocked()
 	if err != nil {
 		return err
 	}
+
 	tmp := a.FilePath + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		// Docker bind-mount 权限问题的典型现场：容器内 app 用户（uid 10001）
@@ -476,4 +458,38 @@ func LoadFile(path string) (*Auth, error) {
 		}
 	}
 	return a, nil
+}
+
+// ExportCredentials returns the same JSON shape as SaveAtomic under the auth
+// lock, so a concurrent refresh cannot mix old and new tokens. No file writes.
+func (a *Auth) ExportCredentials() ([]byte, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if strings.TrimSpace(a.AccessToken) == "" {
+		return nil, fmt.Errorf("missing access token")
+	}
+	return a.credentialJSONLocked()
+}
+
+func (a *Auth) credentialJSONLocked() ([]byte, error) {
+	doc := map[string]any{
+		"auth": map[string]any{
+			"accessToken":  a.AccessToken,
+			"refreshToken": a.RefreshToken,
+			"expiresAt":    a.ExpiresAt,
+			"domain":       a.Domain,
+			"realm":        a.realm,
+		},
+		"account": map[string]any{
+			"uid":          a.UID,
+			"enterpriseId": a.EnterpriseID,
+			"nickname":     a.Nickname,
+		},
+	}
+	// DeviceToken 非空才写回顶层 device_token：避免在无该字段的旧文件里引入空键
+	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。
+	if a.DeviceToken != "" {
+		doc["device_token"] = a.DeviceToken
+	}
+	return json.MarshalIndent(doc, "", "  ")
 }

@@ -681,6 +681,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="note" id="accSeqNote" hidden></span>
           <span class="note" id="accNote"></span>
           <span class="acc-tools" aria-label="账号批量操作">
+            <button class="xs" id="btnExportAll" title="下载全部账号登录凭证，可用于迁移与备份">导出全部凭证</button>
             <button class="xs" id="btnCheckinAll">全部签到</button>
             <button class="xs" id="btnTravelAll">旅行巡检</button>
             <button class="xs" id="btnActivityAll">活跃上报</button>
@@ -1329,7 +1330,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
       <!-- 导入 JSON（cockpit tools 导出批量导入） -->
       <div id="addTabImport" class="tab-panel" hidden>
-        <div class="hint" style="margin-bottom:8px">支持本程序 auth 文件、单账号、账号数组和 accounts/data 等嵌套导出，可多选文件。自动识别 accessToken / access_token 等字段及秒/毫秒过期时间；必须包含 uid、访问令牌和刷新令牌。纯状态或用量文件无法恢复登录凭证。</div>
+        <div class="hint" style="margin-bottom:8px">支持本程序 auth 文件、单账号、账号数组和 accounts/data 等嵌套导出，可多选文件。自动识别 accessToken / access_token / at、refreshToken / rt 及秒/毫秒过期时间；按 domain 自动识别区域，兼容 intl 等国际服标记；必须包含 uid、访问令牌和刷新令牌。纯状态或用量文件无法恢复登录凭证。</div>
         <input type="file" id="importFile" accept=".json" multiple style="margin-bottom:8px">
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" style="white-space:pre-wrap;max-height:220px;overflow:auto" hidden></div>
