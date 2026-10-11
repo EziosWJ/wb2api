@@ -443,7 +443,7 @@ function renderAccounts(list) {
       // mousedown 武装——直接给 tr 挂 draggable 会让选中文字/点按钮都变成拖拽。
       '<td class="drag-handle" title="按住拖动调整选号顺序">⠿</td>' +
       '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
-      '<td>' + tag + note + modelLimitTag(s.rate_limited_models, frozen) + '</td>' +
+      '<td>' + tag + ((s.daily_token_usage || []).some(q => q.limited) ? ' <span class="tag warn">每日 Token 已达限</span>' : '') + note + modelLimitTag(s.rate_limited_models, frozen) + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div>' + expTag + '</td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       inFlightCell(s) +
@@ -458,6 +458,7 @@ function renderAccounts(list) {
         (s.enterprise ? '' : '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '">签到</button>') +
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '">' + (s.enterprise ? '额度' : '余额') + '</button>' +
         (s.enterprise ? '' : '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>') +
+        '<button class="xs ghost" data-a="daily" data-u="' + esc(s.uid) + '">模型用量 / 限额</button>' +
         '<button class="xs ghost" data-a="testchat" data-u="' + esc(s.uid) + '" title="用该账号发一条消息，验证模型可用性">测试</button>' +
         // 「解冻」= 清惩罚态（禁用/冷却/熔断/降权），「恢复」= 解除临时停用。两套独立：
         // 按钮文案与 tooltip 必须说清差异，否则运维分不清该点哪个。
@@ -554,6 +555,7 @@ $('accBody').addEventListener('click', async ev => {
   const b = ev.target.closest('button[data-a]');
   if (!b) return;
   const u = b.dataset.u, a = b.dataset.a;
+  if (a === 'daily') { openDailyQuota(u); return; }
   if (a === 'remove' && !confirm('移除账号将删除池状态与 auths/ 下的凭证文件，且不可恢复。确认移除？')) return;
   if (a === 'disable' && !confirm('永久禁用：该账号不再参与选号，且会清除其冷却/熔断状态，需点「解冻」才能恢复。\n若只是想临时摘出选号池（保留冷却/熔断观测、签到保活照常），请改用「停用」。确认禁用？')) return;
   if (a === 'suspend' && !confirm('临时停用：该账号不再参与选号，但仍在池里——签到/保活/任务照常执行，冷却与熔断状态保留，随时可点「恢复」放回。确认停用？')) return;
@@ -1356,31 +1358,33 @@ $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textCo
 // cockpit tools 导出的 JSON 批量导入（吸收上游 9371f7d）：不走 api()——它固定
 // JSON body，这里要 multipart；密钥头手工带上（与 api() 同口径）。
 $('importFile').onchange = async () => {
-  const file = $('importFile').files[0];
-  if (!file) return;
-  $('importDone').hidden = true; $('importErr').hidden = true;
-  const fd = new FormData();
-  fd.append('file', file);
-  const h = {};
-  const k = localStorage.getItem(LS_KEY);
-  if (k) h['Authorization'] = 'Bearer ' + k;
+  const files = Array.from($('importFile').files || []);
+  if (!files.length) return;
+  $('importFile').disabled = true;
+  $('importDone').hidden = false; $('importErr').hidden = true;
+  let imported = 0, skipped = 0;
+  const errors = [];
+  const h = {}, k = localStorage.getItem(LS_KEY);
+  if (k) h.Authorization = 'Bearer ' + k;
   try {
-    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    $('importDone').hidden = false;
-    $('importDone').textContent = '导入完成：成功 ' + d.imported + ' 个' + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '');
-    if (d.errors && d.errors.length) {
-      // 跳过原因逐条进控制台：面板上只给计数（避免长列表撑爆对话框），
-      // 但要能查到「为什么这条没进来」。
-      console.warn('import errors:', d.errors);
+    for (let i = 0; i < files.length; i++) {
+      $('importDone').textContent = '正在导入 ' + (i + 1) + ' / ' + files.length + '：' + files[i].name;
+      const fd = new FormData(); fd.append('file', files[i]);
+      try {
+        const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+        imported += d.imported || 0; skipped += d.skipped || 0;
+        for (const msg of d.errors || []) errors.push(files[i].name + '：' + msg);
+      } catch (e) { errors.push(files[i].name + '：' + e.message); }
+    }
+    $('importDone').textContent = '导入完成：成功 ' + imported + ' 个，跳过 ' + skipped + ' 个';
+    if (errors.length) {
+      $('importErr').hidden = false;
+      $('importErr').textContent = errors.slice(0, 50).join('\n') + (errors.length > 50 ? '\n其余 ' + (errors.length - 50) + ' 条省略' : '');
     }
     loadOverview(true);
-  } catch (e) {
-    $('importErr').hidden = false;
-    $('importErr').textContent = '导入失败：' + e.message;
-  }
-  $('importFile').value = '';
+  } finally { $('importFile').disabled = false; $('importFile').value = ''; }
 };
 
 /* ── 顶部动作 ─────────────────────────────────────────────────────── */
@@ -2931,3 +2935,60 @@ function bindRange(prefix, load) {
     load();
   };
 }
+
+
+/* 每账号、每模型每日 Token 额度；输入/输出均来自上游 usage。 */
+let dailyQuotaUID = null;
+function dailyQuotaAccount() { return (overviewData && overviewData.accounts || []).find(a => a.uid === dailyQuotaUID); }
+function quotaAmount(n) {
+  n = Number(n || 0);
+  if (!n) return '0';
+  if (n >= 1000000 && n % 1000000 === 0) return (n / 1000000) + 'M';
+  if (n >= 1000 && n % 1000 === 0) return (n / 1000) + 'K';
+  return String(n);
+}
+function quotaBareModel(model) { return String(model || '').trim().replace(/^(global|cn):/, ''); }
+function renderDailyQuota() {
+  const a = dailyQuotaAccount();
+  if (!a) { $('dailyQuotaBody').innerHTML = '<tr><td colspan="6" class="empty">账号已移除</td></tr>'; return; }
+  $('dailyQuotaTitle').textContent = (a.nickname || a.uid.slice(0, 8)) + ' · 模型用量与每日限额';
+  const rows = a.daily_token_usage || [];
+  const models = [...new Set(['deepseek-v4.1-flash', 'deepseek-v4.1-flash-sg', ...rows.map(q => q.model)])];
+  $('dailyQuotaModels').innerHTML = models.map(m => '<option value="' + esc(m) + '"></option>').join('');
+  $('dailyQuotaBody').innerHTML = rows.map(q => '<tr>' +
+    '<td>' + esc(q.model) + '</td><td class="num">' + fmtTok(q.input_tokens) + '</td>' +
+    '<td class="num">' + fmtTok(q.output_tokens) + '</td><td class="num" title="' + Number(q.total_tokens || 0).toLocaleString() + ' Token">' + fmtTok(q.total_tokens) + '</td>' +
+    '<td>' + (q.limit ? esc(quotaAmount(q.limit)) : '不限') + (q.limited ? ' <span class="tag warn">已达限</span>' : '') +
+    (q.missing_usage ? '<small class="muted" style="display:block">' + q.missing_usage + ' 次无用量回报</small>' : '') + '</td>' +
+    '<td><button type="button" class="xs" data-quota-model="' + esc(q.model) + '">设置</button></td></tr>').join('') || '<tr><td colspan="6" class="empty">今天还没有用量，可直接输入模型名设置限额</td></tr>';
+  $('dailyQuotaNote').textContent = '北京时间 ' + (rows[0] && rows[0].day || '') + ' · 每天 00:00 自动重置 · 100M = 100,000,000 Token';
+}
+function selectDailyQuotaModel(model) {
+  $('dailyQuotaModel').value = model;
+  const a = dailyQuotaAccount();
+  const q = (a && a.daily_token_usage || []).find(q => q.model === quotaBareModel(model));
+  $('dailyQuotaLimit').value = quotaAmount(q && q.limit);
+}
+function openDailyQuota(uid) {
+  dailyQuotaUID = uid;
+  $('dailyQuotaError').hidden = true;
+  $('dailyQuotaVeil').classList.add('on');
+  renderDailyQuota(); selectDailyQuotaModel('deepseek-v4.1-flash');
+  loadOverview(true).then(renderDailyQuota);
+}
+$('dailyQuotaClose').onclick = () => { $('dailyQuotaVeil').classList.remove('on'); dailyQuotaUID = null; };
+$('dailyQuotaModel').onchange = () => selectDailyQuotaModel($('dailyQuotaModel').value);
+$('dailyQuotaBody').onclick = ev => { const b = ev.target.closest('[data-quota-model]'); if (b) selectDailyQuotaModel(b.dataset.quotaModel); };
+$('dailyQuotaRefresh').onclick = async () => { await loadOverview(true); renderDailyQuota(); };
+$('dailyQuotaForm').onsubmit = async ev => {
+  ev.preventDefault();
+  const uid = dailyQuotaUID, model = $('dailyQuotaModel').value.trim(), limit = $('dailyQuotaLimit').value.trim();
+  const button = $('dailyQuotaSave'); button.disabled = true; $('dailyQuotaError').hidden = true;
+  try {
+    await api('accounts/' + encodeURIComponent(uid) + '/daily_tokens', { method: 'POST', body: JSON.stringify({ model, limit }) });
+    await loadOverview(true);
+    if (dailyQuotaUID === uid) { renderDailyQuota(); selectDailyQuotaModel(model); }
+    toast('每日限额已保存，立即生效', 'ok');
+  } catch (e) { $('dailyQuotaError').textContent = e.message; $('dailyQuotaError').hidden = false; }
+  finally { button.disabled = false; }
+};

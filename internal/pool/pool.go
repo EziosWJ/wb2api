@@ -222,17 +222,17 @@ func (p *Pool) SetStore(s StoreSnapshotter) {
 //
 // 顺序约束：!ok 判空必须在 inFlightLimit 之前——后者按 realm 取值时会解引用
 // e.a（uid 不在池内时 e 为 nil，如会话粘性路由仍持已移除/禁用账号的 uid）。
-func (p *Pool) Acquire(uid string) bool {
+func (p *Pool) Acquire(uid string) bool { return p.AcquireForModel(uid, "") }
+
+func (p *Pool) AcquireForModel(uid, model string) bool {
 	p.mu.RLock()
+	defer p.mu.RUnlock()
 	e, ok := p.byUID[uid]
-	if !ok {
-		p.mu.RUnlock()
+	if !ok || e.dailyTokenBlocked(time.Now(), model) {
 		return false
 	}
 	limit := p.inFlightLimit(e)
-	p.mu.RUnlock()
 	if limit <= 0 {
-		// 不限：计数仍累加（供状态观测），但永不拒绝。
 		e.inFlight.Add(1)
 		return true
 	}

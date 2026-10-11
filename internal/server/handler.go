@@ -895,8 +895,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if !sgEligible || paidFallback || r.Context().Err() != nil || h.wafIP.active() {
 			return false
 		}
-		_, exhausted := h.cfg.Pool.ModelRateLimitExhausted(pool.DeepseekFreeModel, "global")
-		return exhausted
+		return h.cfg.Pool.DeepseekFreeExhausted()
 	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
@@ -1218,7 +1217,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		tried[acct.UID] = true
 
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
-		if !h.cfg.Pool.Acquire(acct.UID) {
+		if !h.cfg.Pool.AcquireForModel(acct.UID, bareModel) {
 			// 若被抢的正是粘性号，立即解绑并回落普通轮换，避免下一轮仍撞同一个
 			// 满载粘性号再浪费一次 PickByUID 往返（语义与 fail()/PickByUID-nil 的解绑一致）。
 			if stickyUID != "" && acct.UID == stickyUID {
@@ -1851,6 +1850,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		code = "paid_fallback_unavailable"
 		msg = "free global deepseek quota exhausted; no healthy SG account with known credits above pool.reserve_credits"
 		hint = "refresh account balances or wait for free quota recovery; reserve credits are enforced"
+	}
+	if !wafTerminal && h.cfg.Pool != nil {
+		scope := realm
+		if !realmExplicit {
+			scope = ""
+		}
+		if reset, exhausted := h.cfg.Pool.DailyTokenExhausted(bareModel, scope); exhausted {
+			status = http.StatusTooManyRequests
+			code = "daily_token_limit"
+			msg = "all eligible accounts reached the daily token limit for this model"
+			hint = "daily_token_limit: resets at " + reset.Format(time.RFC3339)
+			retryAfter = int(time.Until(reset).Seconds()) + 1
+		}
 	}
 	if retryAfter > 0 {
 		// Retry-After 是 HTTP 标准头（秒数）：429 之外不发——503 的既有契约

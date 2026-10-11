@@ -62,11 +62,13 @@ type TokenUsageDelta struct {
 
 // Status 单个账号对外暴露的状态（脱敏）。
 type Status struct {
-	Enterprise   bool   `json:"enterprise,omitempty"`
-	UID          string `json:"uid"`
-	Nickname     string `json:"nickname,omitempty"`
-	Credits      int64  `json:"credits"`
-	CreditsTotal int64  `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）
+	DailyTokenUsage   []DailyModelQuota `json:"daily_token_usage"`
+	DailyTokenResetAt time.Time         `json:"daily_token_reset_at"`
+	Enterprise        bool              `json:"enterprise,omitempty"`
+	UID               string            `json:"uid"`
+	Nickname          string            `json:"nickname,omitempty"`
+	Credits           int64             `json:"credits"`
+	CreditsTotal      int64             `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）
 	// CreditsExpiring 快过期积分子集（credits 的一部分，见 entry.creditsExpiring），
 	// 口径与 credits_total 一致：0 = 未知/无（omitempty 省略）。
 	//
@@ -145,9 +147,11 @@ type modelCooldown struct {
 	Hits int
 }
 type entry struct {
-	a            *auth.Auth
-	credits      int64
-	creditsTotal int64 // 积分总额度（UserResource 聚合；0 = 未知）
+	dailyTokenLimits map[string]int64
+	dailyModelTokens map[string]DailyModelTokens
+	a                *auth.Auth
+	credits          int64
+	creditsTotal     int64 // 积分总额度（UserResource 聚合；0 = 未知）
 	// creditsExpiring 即将过期（签到时按 expiring_soon 窗口判定）的可用积分子集，
 	// 是 credits 的一部分（credits = creditsExpiring + 长期积分）。选号权重对其
 	// 额外加成：优先消耗快过期积分，避免官方活动赠送的奖励积分到期作废。
@@ -405,6 +409,9 @@ func (e *entry) healthyForModel(now time.Time, reqModel string) bool {
 	if e.disabled || e.manualDisabled {
 		return false
 	}
+	if e.dailyTokenBlocked(now, reqModel) {
+		return false
+	}
 	if e.modelCooled(now, reqModel) {
 		// 该模型在 6004 独立冷却中 → 不可选。
 		return false
@@ -465,10 +472,12 @@ func (e *entry) fallbackKind(now time.Time) string {
 
 // stateAccount 单个账号的持久化状态（JSON tag 全小写下划线，向后兼容：缺字段零值）。
 type stateAccount struct {
-	Credits      int64  `json:"credits"`
-	CreditsTotal int64  `json:"credits_total,omitempty"`
-	Disabled     bool   `json:"disabled"`
-	Reason       string `json:"reason,omitempty"`
+	DailyTokenLimits map[string]int64            `json:"daily_token_limits,omitempty"`
+	DailyModelTokens map[string]DailyModelTokens `json:"daily_model_tokens,omitempty"`
+	Credits          int64                       `json:"credits"`
+	CreditsTotal     int64                       `json:"credits_total,omitempty"`
+	Disabled         bool                        `json:"disabled"`
+	Reason           string                      `json:"reason,omitempty"`
 	// ManualDisabled 运维临时停用（上游 a20d06f / issue #138/#118）。持久化——重启保留
 	// 运维意图，这也正是该功能要解决的痛点之一：旧权宜做法直接改 state.json 会被 5s
 	// flush 覆盖，入口化后无需再碰文件。零值也显式写出（运维口径，同 consecutive_fails）。

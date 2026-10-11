@@ -15,7 +15,7 @@ func (p *Pool) PickDeepseekPaidFallback(tried map[string]bool) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
-	if _, exhausted := p.modelRateLimitExhaustedLocked(DeepseekFreeModel, "global", now); !exhausted {
+	if !p.deepseekFreeExhaustedLocked(now) {
 		return nil
 	}
 	gate := reserveGate{p: p, active: true, line: p.reserveCredits, requireKnown: true}

@@ -297,6 +297,7 @@ func (p *Pool) RecordTokenUsage(uid string, delta TokenUsageDelta) {
 	if !ok {
 		return
 	}
+	e.recordDailyTokens(time.Now(), delta)
 	usage := &e.tokenUsage
 	usage.RequestCount++
 	usage.LastUsedAt = time.Now()
@@ -632,8 +633,10 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 	// 清理 cooledReasonLocked 同口径）。disabled 账号的 reason 是禁用原因，保留。
 	_, reason := cooledReasonLocked(e, now)
 	st := Status{
-		Enterprise: e.a.IsEnterprise(),
-		UID:        uid,
+		DailyTokenUsage:   e.dailyQuotaView(now),
+		DailyTokenResetAt: DailyTokenReset(now),
+		Enterprise:        e.a.IsEnterprise(),
+		UID:               uid,
 		// 限额台账（issue #36）：仅「带解析时间 6004 的模型级软冷却」仍在生效时非空，
 		// 每模型一行（modelCooldowns 内未到期的条目），多模型同时限流全部展示。
 		// 到期判据 = 该模型的独立冷却 until 未过；条件满足才输出，随到期自然消失，

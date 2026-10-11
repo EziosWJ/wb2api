@@ -159,6 +159,8 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			creditsExpiringAt = *s.CreditsExpiringAt
 		}
 		e := &entry{
+			dailyTokenLimits:  s.DailyTokenLimits,
+			dailyModelTokens:  s.DailyModelTokens,
 			a:                 &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
 			credits:           s.Credits,
 			creditsTotal:      s.CreditsTotal,
@@ -352,6 +354,8 @@ func (p *Pool) stateOverviewLocked() stateFile {
 		// 与 statusOf（state.go）共用 cooledReasonLocked，保证落盘与查询同口径。
 		coolKind, reason := cooledReasonLocked(e, now)
 		sf.Accounts[uid] = stateAccount{
+			DailyTokenLimits: e.dailyTokenLimits,
+			DailyModelTokens: e.dailyModelTokens,
 			Credits:          e.credits,
 			CreditsTotal:     e.creditsTotal,
 			Disabled:         e.disabled,

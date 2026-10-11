@@ -592,6 +592,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 本次更新见 [v1.9.36：免费额度耗尽后回退 SG](docs/releases/v1.9.36.md)。默认开启 `pool.deepseek_sg_fallback`，仅限国际服 `deepseek-v4.1-flash` → `deepseek-v4.1-flash-sg`，遵守保留积分线，免费额度恢复后优先切回。
 
+最新更新：[v1.9.37：兼容 JSON 导入与每日模型 Token 限额](docs/releases/v1.9.37.md)。账号池每行的「模型用量 / 限额」可分别设置该账号各模型每日上限，如 `100M`；北京时间零点重置，`0` 为不限。
+
 ## 🖥️ Web 管理面板
 
 内嵌式管理面板（`internal/panel`，前端 go:embed 单文件打进二进制，无外部构建依赖），服务启动后访问：

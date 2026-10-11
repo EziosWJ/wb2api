@@ -173,6 +173,7 @@ func (p *Panel) routes() {
 	// cockpit tools 导出 JSON 批量导入（吸收上游 9371f7d）：Add Account 的
 	// 「导入 JSON」标签页落点。写操作（落盘 + 进池）→ 同 withAuth。
 	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/daily_tokens", p.withAuth(p.accountDailyTokens))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
 	// 临时停用/恢复（上游 a20d06f 吸收）：与上面的 disable/revive 是**两套语义**——

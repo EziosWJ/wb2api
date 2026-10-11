@@ -616,6 +616,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   #view-accounts .acc .acts { max-width: none; }
   #view-accounts .acc-tools { flex: 1 1 100%; justify-content: flex-start; }
 }
+#dailyQuotaVeil .pad { padding: 20px; }
+#dailyQuotaVeil header { display:flex; align-items:center; flex-wrap:wrap; gap:10px; }
+#dailyQuotaVeil header .grow { flex:1; }
+#dailyQuotaVeil h3 { font-size:15px; }
+@media(max-width:600px) { #dailyQuotaVeil .pad { padding:14px; } #dailyQuotaVeil header h3 { flex-basis:100%; } }
 </style>
 </head>
 <body>
@@ -1231,6 +1236,24 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   </div>
 </div>
 
+
+<div class="veil" id="dailyQuotaVeil">
+  <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dailyQuotaTitle" style="max-width:960px;width:calc(100vw - 32px)">
+    <header><h3 id="dailyQuotaTitle">模型用量与每日限额</h3><span class="grow"></span><button type="button" class="xs" id="dailyQuotaRefresh">刷新用量</button><button type="button" class="xs" id="dailyQuotaClose">关闭</button></header>
+    <div class="pad">
+      <p id="dailyQuotaNote" class="muted"></p>
+      <div class="tbl-wrap" style="max-height:340px;margin:14px 0"><table class="acc"><thead><tr><th>模型</th><th class="num">今日输入</th><th class="num">今日输出</th><th class="num">今日合计</th><th>每日上限</th><th></th></tr></thead><tbody id="dailyQuotaBody"></tbody></table></div>
+      <form id="dailyQuotaForm">
+        <div class="grid2"><label class="fld"><span class="lb">模型名称</span><input id="dailyQuotaModel" list="dailyQuotaModels" placeholder="deepseek-v4.1-flash" required maxlength="256"><datalist id="dailyQuotaModels"></datalist></label>
+        <label class="fld"><span class="lb">每日 Token 上限</span><input id="dailyQuotaLimit" placeholder="例如 100M；0 为不限" required maxlength="32"></label></div>
+        <p class="muted">输入与输出合计，含缓存输入。达到上限后该账号不再接收此模型的新请求，其他模型照常。进行中的回复会完成，最终用量可能超过上限；未收到上游用量的请求无法计入精确值。</p>
+        <div id="dailyQuotaError" class="state err" hidden></div>
+        <div style="display:flex;justify-content:flex-end;margin-top:16px"><button type="submit" class="primary" id="dailyQuotaSave">保存限额</button></div>
+      </form>
+    </div>
+  </div>
+</div>
+
 <!-- 积分任务 -->
 <div class="veil" id="taskVeil">
   <div class="dlg" style="width:940px">
@@ -1306,10 +1329,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
       <!-- 导入 JSON（cockpit tools 导出批量导入） -->
       <div id="addTabImport" class="tab-panel" hidden>
-        <div class="hint" style="margin-bottom:8px">选择 cockpit tools 导出的 JSON 文件，批量导入账号。文件需为账号数组格式（含 uid / access_token / refresh_token / domain）。</div>
-        <input type="file" id="importFile" accept=".json" style="margin-bottom:8px">
+        <div class="hint" style="margin-bottom:8px">支持本程序 auth 文件、单账号、账号数组和 accounts/data 等嵌套导出，可多选文件。自动识别 accessToken / access_token 等字段及秒/毫秒过期时间；必须包含 uid、访问令牌和刷新令牌。纯状态或用量文件无法恢复登录凭证。</div>
+        <input type="file" id="importFile" accept=".json" multiple style="margin-bottom:8px">
         <div id="importDone" class="state ok" hidden></div>
-        <div id="importErr" class="state err" hidden></div>
+        <div id="importErr" class="state err" style="white-space:pre-wrap;max-height:220px;overflow:auto" hidden></div>
       </div>
     </div>
     <footer>
