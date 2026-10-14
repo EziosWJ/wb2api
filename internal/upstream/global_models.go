@@ -182,6 +182,7 @@ func (c *Client) FetchGlobalModelInfos(a *auth.Auth) []ModelInfo {
 // storeGlobalModels 落缓存并返回目录（成功路径的公共尾巴：写 models/credits/fetched、
 // 清负缓存）。credits 为 nil 时清空旁表（v3 兜底路径无探测倍率）。
 func (c *Client) storeGlobalModels(merged []ModelInfo, credits map[string]string) []ModelInfo {
+	c.recordModelCatalog("global", merged)
 	c.globalModels.Lock()
 	c.globalModels.models = merged
 	c.globalModels.credits = credits

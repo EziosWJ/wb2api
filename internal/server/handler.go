@@ -332,6 +332,9 @@ func NewHandler(cfg Config) *Handler {
 		Precedence:    cfg.RealmPrecedence,
 		HasRealm:      hasRealm,
 	}
+	if cfg.Upstream != nil {
+		h.router.ModelRealms = cfg.Upstream.ModelRealms
+	}
 	h.maxBodyBytes.Store(cfg.MaxBodyBytes)
 	h.maxRotate.Store(int64(cfg.MaxRotate))
 	h.readTimeout.Store(int64(cfg.ReadTimeout))
@@ -876,20 +879,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	declaredTools := upstream.ToolNameAllowlist(body)
 
 	// realm 归属解析：model 名可带显式 "[realm:]" 前缀（老客户端配置兼容）；
-	// 裸名按池内可用域归属——单域部署（只登国际版账号）下裸名直接走该域，
-	// 多域部署按 realm_precedence。bareModel 用于选号/粘性/出站 body 重写。
+	// 裸名先按目录分组，独有模型固定走所属域；共有/未知模型按可用域与优先级选择。
+	// bareModel 用于选号/粘性/出站 body 重写。
 	//
-	// realmExplicit 区分归属来源（issue #199c 跨域回落的开关）：显式前缀 = 用户强指定，
-	// 本域无可用号时**不跨域回落**（换域可能违反其意图）；裸名归属 = 网关默认倾向，
-	// 本域无可用号时回落另一域，避免混合池下「本域全限流即 503」而另一域明明可用。
-	realm, bareModel, realmExplicit := h.router.ResolveWithSource(peek.Model)
+	// 显式前缀和目录独有模型不跨域回落。共有/未知裸名保留跨域回落，
+	// 避免本域全限流时忽略另一域的可用账号。
+	realm, bareModel, _, realmRestricted := h.router.ResolveRoute(peek.Model)
 	// Snapshot the opt-in once. Bare names resolving to global share this policy;
 	// explicit CN and all other models retain their existing routing.
 	sgEligible := h.loadLive().DeepseekSGFallback && h.cfg.GlobalEnabled && realm == "global" && bareModel == pool.DeepseekFreeModel
 	paidFallback := false
 	actualModel := peek.Model
 	if sgEligible {
-		realmExplicit = true
+		realmRestricted = true
 	}
 	freeExhausted := func() bool {
 		if !sgEligible || paidFallback || r.Context().Err() != nil || h.wafIP.active() {
@@ -1204,12 +1206,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if acct == nil && !paidFallback {
 			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
 			// （healthyForModel），realm 谓词过滤跨域账号。
-			// 裸名归属（realmExplicit=false）走软优先入口：本域无候选（含 6004 模型级
+			// 共有/未知裸名（realmRestricted=false）走软优先入口：本域无候选（含 6004 模型级
 			// 冷却在 healthyForModel 里过滤掉本域全部号的情形）时回落另一域再选一次
 			// ——混合池 1 global + 1 cn 且 realm_precedence=global 时，global 号对该模型
 			// 429/6004 后第二轮选号不再无候选 503，而是落到 cn 号。显式前缀是用户强指定，
 			// 用硬过滤入口，不跨域。
-			if realmExplicit {
+			if realmRestricted {
 				acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
 			} else {
 				acct = h.cfg.Pool.PickExcludingForRealmFallback(tried, bareModel, realm)
@@ -1780,7 +1782,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	retryAfter := 0
 	if !wafTerminal && !paramsTerminal && h.cfg.Pool != nil {
 		scope := realm
-		if !realmExplicit {
+		if !realmRestricted {
 			scope = "" // 裸名归属：回落允许跨域 → 判定范围是全池
 		}
 		// 保留积分耗尽（pool.reserve_credits）：池内候选**全部**只因余额 ≤ 保留线而出局
@@ -1833,7 +1835,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// existing 429/Retry-After contract; 11102 or mixed model locks return 400.
 	if !wafTerminal && !paramsTerminal && status == http.StatusServiceUnavailable && h.cfg.Pool != nil {
 		scope := realm
-		if !realmExplicit {
+		if !realmRestricted {
 			scope = ""
 		}
 		block := h.cfg.Pool.ModelBlocked(bareModel, scope)
@@ -1862,7 +1864,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if !wafTerminal && h.cfg.Pool != nil {
 		scope := realm
-		if !realmExplicit {
+		if !realmRestricted {
 			scope = ""
 		}
 		if reset, exhausted := h.cfg.Pool.DailyTokenExhausted(bareModel, scope); exhausted {

@@ -842,6 +842,9 @@ type Client struct {
 	// 1h TTL + 5min 负缓存），见 global_models.go。按实例持有，测试新建 Client 即隔离。
 	globalModels fetchGlobalModelsCache
 
+	modelCatalogMu sync.RWMutex
+	modelCatalog   map[string]map[string]bool
+
 	// sanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	// 面板保存配置时热改（SetSanitizeFingerprints），与请求路径 prepareBody 的读
 	// 属于不同 goroutine——裸 bool 在 Go 内存模型下是数据竞争，故用 atomic。
@@ -1566,6 +1569,7 @@ func (c *Client) FetchModelsDiagContext(ctx context.Context, a *auth.Auth) ([]Mo
 		}
 		out, diag, err := c.fetchModelsOnce(ctx, a, path)
 		if err == nil {
+			c.recordModelCatalog(a.Realm(), out)
 			return out, diag, nil
 		}
 		lastDiag, lastErr = diag, err
@@ -1575,6 +1579,7 @@ func (c *Client) FetchModelsDiagContext(ctx context.Context, a *auth.Auth) ([]Mo
 		out := v3CatalogInfos(overlay)
 		out = MergeCatalogOverlay(out, overlay, nil)
 		c.cacheModelEfforts(a, out)
+		c.recordModelCatalog(a.Realm(), out)
 		return out, ModelFetchDiag{Path: "/v3/config"}, nil
 	}
 	return nil, lastDiag, lastErr
