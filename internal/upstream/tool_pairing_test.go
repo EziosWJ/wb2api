@@ -3,6 +3,7 @@ package upstream
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -761,7 +762,6 @@ func assertSummary(t *testing.T, got, want []string) {
 		}
 	}
 }
-
 
 // TestCleanupOrphanToolCallsEmptyName 空 function.name 的钉桩用例（线上 11133）。
 //
