@@ -17,7 +17,7 @@
 | Fill First 填充优先 | 配置 `pool.pick_mode=sequential`，按账号顺序使用，在途满额或不可用时切换下一账号；面板支持拖动排序，并保留最近到期积分优先的处理。默认仍为 `weighted` 加权模式 |
 | 无前缀模型路由 | `/v1/models` 默认输出裸模型名。根据目录判断模型所属区域：国内独有走国内、国际独有走国际，两边共有才按区域优先级选择；显式 `cn:` / `global:` 仍有效 |
 | 国内与国际分区 | 账号显示所属区域，模型页面可分别查询国内和国际目录；测试对话按所选账号区域加载模型 |
-| 免费 DeepSeek 用尽后转 SG | 国际免费 `deepseek-v4.1-flash` 全池额度耗尽后，可切到 `deepseek-v4.1-flash-sg`；付费候选必须有已知余额且高于保留积分线。免费额度恢复后，新请求优先免费模型 |
+| DeepSeek 分阶段回退 | 无前缀 4.1 走国际区时，按国际免费 `deepseek-v4.1-flash` → 国际 `deepseek-v4.1-flash-sg` → 国内同名 4.1 的顺序回退。SG 和国内阶段均要求已知余额高于保留积分线；国内 4.1 按积分计费 |
 | 每账号、每模型每日 Token 限额 | 在账号行“模型用量 / 限额”分别设置，如 `100M`；北京时间零点重置，输入与输出合计，含缓存输入；`0` 表示不限 |
 | 兼容多种 JSON 凭证 | 支持本程序嵌套结构、第三方常见数组与包装格式、`at` / `rt` 简写；根据域名与区域标记识别国内、国际账号，包括 `realm: "intl"` |
 | 凭证导出与迁移 | 单账号“导出凭证”及“导出全部凭证”，导出的 JSON 可重新导入 |
@@ -27,7 +27,7 @@
 | 配置持久化 | 容器配置保存在 `/app/data/config.json`；面板支持在线保存，启动期参数会提示需要重启 |
 | 工具调用兼容 | 适配工具调用历史、配对与空名称清理、推理字段，以及流式与非流式响应 |
 
-功能随版本更新，具体变更见 [Releases](https://github.com/CSSZYF/wb2api/releases)。最近的 `v1.9.40` 修复了模型去前缀后因区域优先级而请求错误分组的问题。
+功能随版本更新，具体变更见 [Releases](https://github.com/CSSZYF/wb2api/releases)。`v1.9.40` 增加模型分区路由，`v1.9.41` 修复国际 DeepSeek 免费额度与 SG 均耗尽后，无前缀请求无法继续回退国内同名模型的问题。
 
 ## 快速开始
 
@@ -44,7 +44,7 @@ docker compose pull
 docker compose up -d
 ```
 
-仓库中的 [docker-compose.yml](docker-compose.yml) 使用已构建的 `ghcr.io/csszyf/wb2api:latest`，**无需本地编译，也无需先复制 config.example.json**。需要固定版本时，将 Compose 的 `image` 改为 `ghcr.io/csszyf/wb2api:v1.9.40`。
+仓库中的 [docker-compose.yml](docker-compose.yml) 使用已构建的 `ghcr.io/csszyf/wb2api:latest`，**无需本地编译，也无需先复制 config.example.json**。需要固定版本时，将 Compose 的 `image` 改为 `ghcr.io/csszyf/wb2api:v1.9.41`。
 
 首次启动会在宿主机 `./data/config.json` 生成配置和随机 `api_key`。打开该文件查看密钥，然后访问：
 
@@ -75,7 +75,7 @@ docker run -d --name wb2api \
   -e WB2A_AUTH_DIR=/app/data/auths \
   -e WB2A_STATE_FILE=/app/data/state.json \
   -v "$PWD/data:/app/data" \
-  ghcr.io/csszyf/wb2api:v1.9.40
+  ghcr.io/csszyf/wb2api:v1.9.41
 ```
 
 此方式与 Compose 使用相同的数据目录和端口。容器首次以 root 进入入口脚本修正数据卷权限，再降权为 UID `10001` 运行服务。
@@ -171,7 +171,7 @@ curl -sN http://127.0.0.1:7863/v1/chat/completions \
 |---|---|
 | `pool.pick_mode` | `sequential` 为 Fill First，`weighted` 为加权选号；默认 `weighted` |
 | `pool.reserve_credits` | 保留积分线，默认 `50`；余额触底时按模型免费／低价判定限制消费 |
-| `pool.deepseek_sg_fallback` | 默认开启，仅用于国际免费 DeepSeek Flash 全池耗尽后的 SG 回退；网络、WAF、忙碌或缺模型错误不会触发付费回退 |
+| `pool.deepseek_sg_fallback` | 默认开启；国际免费 DeepSeek 全池耗尽后转 SG，SG 全池额度耗尽或已知余额达到保留线后，无前缀请求可继续转国内同名 4.1。国内按积分计费，需已知余额高于保留线；网络、WAF、忙碌、缺模型或余额未知不作为额度耗尽 |
 | `models.strip_realm_prefix` | 默认 `true`，对外模型列表使用裸名 |
 | `models.realm_precedence` | 默认 `global`，也可设 `cn`；应用于两域共有或归属未知的裸名模型 |
 | `global.enabled` | 国际区域路由开关，关闭时保留原有国内锁定行为 |
@@ -217,6 +217,14 @@ Compose 和上面的 Docker 命令只需持久化一个目录：
 **模型列表加载失败？** 点击“重新获取”，并确认对应区域有可用账号。测试弹窗可先使用默认模型，但实际是否可调用仍取决于账号及上游支持。
 
 **国内独有模型仍被发到国际？** 确认运行版本至少为 `v1.9.40`，刷新对应区域目录；显式填写了 `global:` 前缀时仍按该前缀路由。
+
+**国际 4.1 和 SG 都用完了，国内同名模型仍没被使用？** 升级至 `v1.9.41`，使用无前缀 `deepseek-v4.1-flash`，保持 SG 回退开启，并确认国内账号余额已刷新且高于保留积分线。显式 `global:` 仍固定在国际区；直接请求 `deepseek-v4.1-flash-sg` 也不会改成国内 4.1。新请求在国际免费额度或 SG 恢复后重新优先它们。
+
+**多图会话收到 413？** `server.max_body_mb` 默认 `0`，表示关闭网关请求体上限。显式设为正数后，超过该大小会返回 `413 request_body_too_large`；可在配置页调大或置 `0`，保存即时生效。例如配置 `32` 时的响应如下：
+
+```json
+{"error":{"message":"请求体超过网关内存护栏 32 MB：这是网关侧上限（防止单请求吃爆进程内存），不是上游限制；网关默认不设该上限（server.max_body_mb=0 = 不预拦截，大请求交上游自然响应），当前值由运维显式配置——可在面板「请求体上限」调大或置 0 关闭（保存即时生效）。多图会话易触发：历史图片每轮以 base64 重发（膨胀约 37%），请压缩图片或调大上限后重试","type":"api_error","code":"request_body_too_large"}}
+```
 
 **流中断或 WAF 错误？** HTTP `200` 只说明流已建立，不代表完整生成成功。请提供发生时间、版本、模型及对应运行日志；已经输出内容的流不能简单靠整段重试无缝续接。
 

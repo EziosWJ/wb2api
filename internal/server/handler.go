@@ -884,20 +884,27 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//
 	// 显式前缀和目录独有模型不跨域回落。共有/未知裸名保留跨域回落，
 	// 避免本域全限流时忽略另一域的可用账号。
-	realm, bareModel, _, realmRestricted := h.router.ResolveRoute(peek.Model)
+	realm, bareModel, realmExplicit, realmRestricted := h.router.ResolveRoute(peek.Model)
 	// Snapshot the opt-in once. Bare names resolving to global share this policy;
 	// explicit CN and all other models retain their existing routing.
 	sgEligible := h.loadLive().DeepseekSGFallback && h.cfg.GlobalEnabled && realm == "global" && bareModel == pool.DeepseekFreeModel
 	paidFallback := false
+	cnFallback := false
+	// This specific model chain may use paid CN 4.1 after SG. Keep explicit
+	// prefixes fixed, and do not apply this exception to other catalog groups.
+	cnFallbackAllowed := sgEligible && !realmExplicit && h.cfg.Pool.HasRealm("cn")
 	actualModel := peek.Model
 	if sgEligible {
 		realmRestricted = true
 	}
 	freeExhausted := func() bool {
-		if !sgEligible || paidFallback || r.Context().Err() != nil || h.wafIP.active() {
+		if !sgEligible || paidFallback || cnFallback || r.Context().Err() != nil || h.wafIP.active() {
 			return false
 		}
 		return h.cfg.Pool.DeepseekFreeExhausted()
+	}
+	cnFallbackPending := func() bool {
+		return cnFallbackAllowed && paidFallback && !cnFallback && r.Context().Err() == nil && !h.wafIP.active() && h.cfg.Pool.DeepseekCNFallbackReady()
 	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
@@ -1145,7 +1152,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 轮转中途面板改值不影响本请求已定的次数，避免同请求内上限漂移。
 	maxRotate := h.rotateLimit()
 	maxAttempts := maxRotate
-	for i := 0; i < maxAttempts || freeExhausted(); i++ {
+	for i := 0; i < maxAttempts || freeExhausted() || cnFallbackPending(); i++ {
 		if freeExhausted() {
 			paidFallback = true
 			bareModel, actualModel = pool.DeepseekPaidModel, "global:"+pool.DeepseekPaidModel
@@ -1159,6 +1166,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			lastErr = nil
 			maxAttempts = i + maxRotate // one bounded SG rotation phase
 			log.Printf("INFO: [server] global free pool exhausted; fallback %s -> %s (reserve=%d)", pool.DeepseekFreeModel, bareModel, h.cfg.Pool.ReserveCredits())
+		}
+		if cnFallbackPending() {
+			paidFallback, cnFallback = false, true
+			realm, realmRestricted = "cn", true
+			bareModel, actualModel = pool.DeepseekFreeModel, "cn:"+pool.DeepseekFreeModel
+			body = rewriteModel(body, bareModel)
+			st.model = actualModel
+			w.Header().Set("X-WB2API-Requested-Model", peek.Model)
+			w.Header().Set("X-WB2API-Actual-Model", actualModel)
+			tried = map[string]bool{}
+			unbindSticky()
+			ptlRetryUID = ""
+			lastErr = nil
+			maxAttempts = i + maxRotate
+			log.Printf("INFO: [server] global DeepSeek and SG unavailable; fallback to %s (reserve=%d)", actualModel, h.cfg.Pool.ReserveCredits())
 		}
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
@@ -1193,7 +1215,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				acct = nil
 			}
 		}
-		if paidFallback && acct != nil {
+		if (paidFallback || cnFallback) && acct != nil {
 			// Pinned max_tokens retry still has to pass the paid reserve check.
 			stPaid, ok := h.cfg.Pool.Status(acct.UID)
 			if !ok || stPaid.Credits <= h.cfg.Pool.ReserveCredits() || (stPaid.CreditsTotal <= 0 && !(stPaid.Enterprise && stPaid.CreditsTotal == -1)) {
@@ -1203,7 +1225,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if acct == nil && paidFallback {
 			acct = h.cfg.Pool.PickDeepseekPaidFallback(tried)
 		}
-		if acct == nil && !paidFallback {
+		if acct == nil && cnFallback {
+			acct = h.cfg.Pool.PickDeepseekCNFallback(tried)
+		}
+		if acct == nil && !paidFallback && !cnFallback {
 			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
 			// （healthyForModel），realm 谓词过滤跨域账号。
 			// 共有/未知裸名（realmRestricted=false）走软优先入口：本域无候选（含 6004 模型级
@@ -1861,6 +1886,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		code = "paid_fallback_unavailable"
 		msg = "free global deepseek quota exhausted; no healthy SG account with known credits above pool.reserve_credits"
 		hint = "refresh account balances or wait for free quota recovery; reserve credits are enforced"
+	}
+	if cnFallback && lastErr == nil && status == http.StatusServiceUnavailable {
+		code = "cn_fallback_unavailable"
+		msg = "international DeepSeek and SG unavailable; no healthy CN account with known credits above pool.reserve_credits"
+		hint = "refresh CN account balances or wait for quota recovery; CN DeepSeek consumes credits and reserve credits are enforced"
 	}
 	if !wafTerminal && h.cfg.Pool != nil {
 		scope := realm
