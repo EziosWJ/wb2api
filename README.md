@@ -2,13 +2,13 @@
 
 将 WorkBuddy / CodeBuddy 国内与国际账号接入 OpenAI 兼容 API 的多账号网关，附带 Web 管理面板。
 
-[![Release](https://img.shields.io/github/v/release/CSSZYF/wb2api)](https://github.com/CSSZYF/wb2api/releases/latest)
-[![Build](https://github.com/CSSZYF/wb2api/actions/workflows/docker.yml/badge.svg)](https://github.com/CSSZYF/wb2api/actions/workflows/docker.yml)
-[![License](https://img.shields.io/github/license/CSSZYF/wb2api)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/csszyft/wb2api)](https://github.com/csszyft/wb2api/releases/latest)
+[![Build](https://github.com/csszyft/wb2api/actions/workflows/docker.yml/badge.svg)](https://github.com/csszyft/wb2api/actions/workflows/docker.yml)
+[![License](https://img.shields.io/github/license/csszyft/wb2api)](LICENSE)
 
-[下载程序](https://github.com/CSSZYF/wb2api/releases/latest) · [容器镜像](https://github.com/CSSZYF/wb2api/pkgs/container/wb2api) · [版本记录](https://github.com/CSSZYF/wb2api/releases) · [反馈问题](https://github.com/CSSZYF/wb2api/issues)
+[下载程序](https://github.com/csszyft/wb2api/releases/latest) · [容器镜像](https://github.com/csszyft/wb2api/pkgs/container/wb2api) · [版本记录](https://github.com/csszyft/wb2api/releases) · [反馈问题](https://github.com/csszyft/wb2api/issues)
 
-本仓库基于 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 持续维护，原始项目为 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)。下文的安装命令、镜像和下载链接均指向 **CSSZYF/wb2api**。上游更新按本仓库的路由与面板需求适配合入。
+本仓库基于 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 持续维护，原始项目为 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)。下文的安装命令、镜像和下载链接均指向 **csszyft/wb2api**。上游更新按本仓库的路由与面板需求适配合入。
 
 ## 本仓库的改动与优化
 
@@ -27,7 +27,7 @@
 | 配置持久化 | 容器配置保存在 `/app/data/config.json`；面板支持在线保存，启动期参数会提示需要重启 |
 | 工具调用兼容 | 适配工具调用历史、配对与空名称清理、推理字段，以及流式与非流式响应 |
 
-功能随版本更新，具体变更见 [Releases](https://github.com/CSSZYF/wb2api/releases)。`v1.9.40` 增加模型分区路由，`v1.9.41` 修复国际 DeepSeek 免费额度与 SG 均耗尽后，无前缀请求无法继续回退国内同名模型的问题。
+功能随版本更新，具体变更见 [Releases](https://github.com/csszyft/wb2api/releases)。`v1.9.40` 增加模型分区路由，`v1.9.41` 修复国际 DeepSeek 免费额度与 SG 均耗尽后，无前缀请求无法继续回退国内同名模型的问题。
 
 ## 快速开始
 
@@ -38,13 +38,13 @@
 安装 Docker 和 Compose 后执行：
 
 ```bash
-git clone https://github.com/CSSZYF/wb2api.git
+git clone https://github.com/csszyft/wb2api.git
 cd wb2api
 docker compose pull
 docker compose up -d
 ```
 
-仓库中的 [docker-compose.yml](docker-compose.yml) 使用已构建的 `ghcr.io/csszyf/wb2api:latest`，**无需本地编译，也无需先复制 config.example.json**。需要固定版本时，将 Compose 的 `image` 改为 `ghcr.io/csszyf/wb2api:v1.9.41`。
+仓库中的 [docker-compose.yml](docker-compose.yml) 使用已构建的 `ghcr.io/csszyft/wb2api:latest`，**无需本地编译，也无需先复制 config.example.json**。需要固定版本时，将 Compose 的 `image` 改为 `ghcr.io/csszyft/wb2api:v1.9.41`。
 
 首次启动会在宿主机 `./data/config.json` 生成配置和随机 `api_key`。打开该文件查看密钥，然后访问：
 
@@ -75,14 +75,14 @@ docker run -d --name wb2api \
   -e WB2A_AUTH_DIR=/app/data/auths \
   -e WB2A_STATE_FILE=/app/data/state.json \
   -v "$PWD/data:/app/data" \
-  ghcr.io/csszyf/wb2api:v1.9.41
+  ghcr.io/csszyft/wb2api:v1.9.41
 ```
 
 此方式与 Compose 使用相同的数据目录和端口。容器首次以 root 进入入口脚本修正数据卷权限，再降权为 UID `10001` 运行服务。
 
 ### 方式三：下载 Windows / Linux / macOS 程序包
 
-从 [本仓库 Releases](https://github.com/CSSZYF/wb2api/releases/latest) 下载对应平台的压缩包并完整解压：
+从 [本仓库 Releases](https://github.com/csszyft/wb2api/releases/latest) 下载对应平台的压缩包并完整解压：
 
 | 系统 | 文件名中的平台 |
 |---|---|
@@ -113,7 +113,7 @@ Windows 程序包还提供 `start-wb2api.cmd`、`stop-wb2api.cmd`、`status-wb2a
 安装 Go，版本至少满足 [go.mod](go.mod) 的要求，然后执行：
 
 ```bash
-git clone https://github.com/CSSZYF/wb2api.git
+git clone https://github.com/csszyft/wb2api.git
 cd wb2api
 go build -trimpath -ldflags "-s -w" -o wb2api ./cmd/server
 ./wb2api -config config.json
@@ -237,13 +237,13 @@ go test ./...
 go vet ./...
 ```
 
-发布流程分为 [程序包构建](https://github.com/CSSZYF/wb2api/actions/workflows/release.yml) 与 [容器镜像构建](https://github.com/CSSZYF/wb2api/actions/workflows/docker.yml)。正式版本由 Git tag 注入，镜像发布 `v版本号` 与 `latest`，支持 `linux/amd64` 和 `linux/arm64`。程序包支持 Windows、Linux 和 macOS，具体资产见 Releases。
+发布流程分为 [程序包构建](https://github.com/csszyft/wb2api/actions/workflows/release.yml) 与 [容器镜像构建](https://github.com/csszyft/wb2api/actions/workflows/docker.yml)。正式版本由 Git tag 注入，镜像发布 `v版本号` 与 `latest`，支持 `linux/amd64` 和 `linux/arm64`。程序包支持 Windows、Linux 和 macOS，具体资产见 Releases。
 
-反馈问题请前往 [本仓库 Issues](https://github.com/CSSZYF/wb2api/issues)，附运行版本、部署方式、发生时间、模型、脱敏日志及复现步骤。不要上传 API Key、Access Token、Refresh Token 或完整凭证。
+反馈问题请前往 [本仓库 Issues](https://github.com/csszyft/wb2api/issues)，附运行版本、部署方式、发生时间、模型、脱敏日志及复现步骤。不要上传 API Key、Access Token、Refresh Token 或完整凭证。
 
 ## 来源与许可
 
-- 本仓库：[CSSZYF/wb2api](https://github.com/CSSZYF/wb2api)
+- 本仓库：[csszyft/wb2api](https://github.com/csszyft/wb2api)
 - 面板上游：[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)
 - 原始项目：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)
 

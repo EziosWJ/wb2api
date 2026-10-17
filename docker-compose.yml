@@ -1,6 +1,6 @@
 services:
   wb2api:
-    image: ghcr.io/csszyf/wb2api:latest   # 生产建议钉显式版本，如 :v1.9.4
+    image: ghcr.io/csszyft/wb2api:latest   # 生产建议钉显式版本，如 :v1.9.41
     container_name: workbuddy2api
     restart: unless-stopped
     environment:
