@@ -39,6 +39,12 @@ func TestDefaultPinnedModels(t *testing.T) {
 	if !ds.SupportsReasoning {
 		t.Error("supports_reasoning 应为 true（面板显示「固定档 · 默认 high」）")
 	}
+	if !ds.SupportsImages {
+		t.Error("supports_images 应为 true（1017 版本支持原生多模态）")
+	}
+	if ds.MaxAllowedSize != 1000000 {
+		t.Errorf("max_allowed_size=%d want 1000000", ds.MaxAllowedSize)
+	}
 	if len(ds.SupportedEfforts) != 0 {
 		t.Errorf("supported_efforts=%v 应为空——空数组/缺键才是「固定档」语义", ds.SupportedEfforts)
 	}

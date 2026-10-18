@@ -41,6 +41,7 @@ const (
 	ErrInvalidImage                  // 11135「invalid_image_data」→ 请求级终态（图片数据无效是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrModelBlocked                  // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
 	ErrWafBlock                      // 403 + 非业务信封体（WAF 拦截页/空体）→ 账号软冷却 + 抖动退避（WAF 403 修复 P0-1）
+	ErrUpstreamBusy                  // 6021「queue.full.title」渠道级容量满载（非账号问题）→ 不罚号、不轮转，末端 503 + upstream_busy
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -70,6 +71,8 @@ func (k ErrKind) String() string {
 		return "model_blocked"
 	case ErrWafBlock:
 		return "waf_block"
+	case ErrUpstreamBusy:
+		return "upstream_busy"
 	case ErrClient:
 		return "client"
 	default:
@@ -447,6 +450,17 @@ func hasBusinessEnvelope(body string) bool {
 	return strings.Contains(body, `"code":`) || strings.Contains(body, `"msg":`)
 }
 
+func IsGatewayUnauthorized(status int, body string) bool {
+	return status == http.StatusUnauthorized && !hasBusinessEnvelope(body)
+}
+
+func IsUpstreamBusy(body string) bool {
+	if hasBusinessCode(body, "6021") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(body), "queue.full")
+}
+
 // IsWafBlocked recognizes non-business 403 responses and explicit WAF HTML
 // served with status 503. Other 5xx responses retain server-error semantics.
 func IsWafBlocked(status int, body string) bool {
@@ -683,6 +697,11 @@ func Classify(status int, body string) ErrKind {
 	if status == http.StatusTooManyRequests && hasBusinessCode(body, "14018") {
 		return ErrHardCredit
 	}
+	// 6021「queue.full.title」是推理集群队列满载（渠道级容量信号），不是单账号限流。
+	// 判在通用 429 之前，避免把全池健康号逐个软冷却。
+	if IsUpstreamBusy(body) {
+		return ErrUpstreamBusy
+	}
 	// status==429 先于 hardMarkers（fork-scan-absorb T-3，本次修复点）：限流响应 body
 	// 高频携带 "quota exceeded"/"额度不足" 等跨两界措辞，hardMarkers 先判会误归
 	// ErrHardCredit 硬冷却到次日 04:00。402 真余额在上层已判；非 429 的 quota
@@ -734,6 +753,9 @@ func Classify(status int, body string) ErrKind {
 	// → ErrAccountFault 禁用语义不变），走不到本层。
 	if IsWafBlocked(status, body) {
 		return ErrWafBlock
+	}
+	if IsGatewayUnauthorized(status, body) {
+		return ErrSessionDead
 	}
 	// 内容策略拦截（HTTP 400 + 审核文案）：判在通用 ErrClient 之前。
 	// 这是误报信号，不罚账号，由网关降级重试处理（见 handler.applyErrorPolicy）。

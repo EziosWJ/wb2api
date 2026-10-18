@@ -49,8 +49,10 @@ var DefaultPinnedModels = []PinnedModel{
 		Credits:           "x0.00",
 		ContextLength:     1000000,
 		MaxOutputTokens:   128000,
+		MaxAllowedSize:    1000000,
 		DefaultEffort:     "high",
 		SupportsReasoning: true,
+		SupportsImages:    true,
 	},
 }
 

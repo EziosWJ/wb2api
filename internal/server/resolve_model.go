@@ -55,11 +55,19 @@ func (r RealmRouter) ResolveWithSource(model string) (realm, bare string, explic
 	return realm, bare, explicit
 }
 
+func normalizeModelAlias(bare string) string {
+	if strings.EqualFold(strings.TrimSpace(bare), "deepseek-v4.1-flash-1017") {
+		return "deepseek-v4.1-flash"
+	}
+	return bare
+}
+
 // ResolveRoute snapshots grouping and fallback permission in the same lookup.
 func (r RealmRouter) ResolveRoute(model string) (realm, bare string, explicit, restricted bool) {
 	if realm, bare, ok := splitRealmPrefix(model); ok {
-		return realm, bare, true, true
+		return realm, normalizeModelAlias(bare), true, true
 	}
+	model = normalizeModelAlias(model)
 	if realm := r.CatalogRealm(model); realm != "" {
 		return realm, model, false, true
 	}

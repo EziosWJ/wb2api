@@ -60,6 +60,8 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		return "upstream WAF blocked the gateway; retry after the block window"
 	case ErrSoftRate:
 		return "rate limited by upstream; retry after reset"
+	case ErrUpstreamBusy:
+		return "upstream inference queue is full (code 6021); retry after a short backoff"
 	case ErrAccountFault:
 		return "account-level fault at upstream (auth/quota state); the gateway will rotate or disable this account"
 	case ErrSessionDead:

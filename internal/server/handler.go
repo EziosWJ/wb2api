@@ -138,6 +138,7 @@ func (h *Handler) softCooldown() time.Duration {
 // 若共用 soft_rate（600s 起 + 指数升级），一次偶发 404 会把好账号罚 10 分钟并逐次加倍。
 // 故固定 60s 防雪崩即可，不随 soft_rate 配置、也不参与软退避指数。
 const notFoundCooldown = 60 * time.Second
+const gatewayUnauthorizedReason = "401 invalid token (re-login required)"
 
 // ServiceName 网关身份标识。经 /healthz 响应体 service 字段与 X-Service 头同时透出：
 // 宿主（如 workbuddy-switch 托管网关子进程）探测同端口的旧服务/其他服务时，对方即使
@@ -619,10 +620,11 @@ func (h *Handler) modelList() []map[string]any {
 		}
 	}
 	if glOn || both {
-		for _, mi := range h.cfg.HiddenModels.FilterInfo(h.fetchGlobalModelInfos()) {
+		glInfos := upstream.FillMissingFromPinned(h.cfg.HiddenModels.FilterInfo(h.fetchGlobalModelInfos()), h.cfg.PinnedModels)
+		for _, mi := range glInfos {
 			entry := modelEntry("", mi)
-			if pm, ok := pinnedByID[mi.ID]; ok {
-				entry = pm.Entry() // 完整快照覆盖（含倍率 / 档位）
+			if pm, ok := pinnedByID[mi.ID]; ok && pm.Credits != "" {
+				entry["credits"] = pm.Credits
 			}
 			glEntries = append(glEntries, realmEntry{"global", entry})
 		}
@@ -885,6 +887,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 显式前缀和目录独有模型不跨域回落。共有/未知裸名保留跨域回落，
 	// 避免本域全限流时忽略另一域的可用账号。
 	realm, bareModel, realmExplicit, realmRestricted := h.router.ResolveRoute(peek.Model)
+	if _, rawBare, ok := splitRealmPrefix(peek.Model); (ok && rawBare != bareModel) || (!ok && peek.Model != bareModel) {
+		body = rewriteModel(body, bareModel)
+	}
 	// Snapshot the opt-in once. Bare names resolving to global share this policy;
 	// explicit CN and all other models retain their existing routing.
 	sgEligible := h.loadLive().DeepseekSGFallback && h.cfg.GlobalEnabled && realm == "global" && bareModel == pool.DeepseekFreeModel
@@ -1544,6 +1549,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
+			if kind == upstream.ErrUpstreamBusy {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr, errDedup)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "upstream capacity is full (queue.full); retry after a short wait"
+				}
+				writeOpenAIErrorHint(w, http.StatusServiceUnavailable, "upstream_busy", msg,
+					h.hintOf(upstream.ErrUpstreamBusy, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusServiceUnavailable
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
 			// lastErr 携带展示态 body（DisplayBody：JSON 业务错误原文全量透传，
 			// HTML 错误页压成单行摘要——整页 WAF HTML 不能拼进客户端 error.message）
 			// + Kind/Status（末端映射与冷却时长共用）+ RetryAfter（末端 429 映射
@@ -2036,6 +2054,13 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 「13 个 disabled 号全部 refresh 成功，是历史误判的受害者」。单次 12153 多为
 		// 临时抖动（网络/闪断/refresh 竞态），不该永久摘号。
 		// 未达阈值时零额外惩罚（12153 不是限流信号，冷却它没有语义）：仅累计计数并换号。
+		if uerr != nil && upstream.IsGatewayUnauthorized(uerr.Status, body) {
+			if h.cfg.Pool.NoteSessionDeadWith(uid, gatewayUnauthorizedReason) {
+				log.Printf("WARN: [server] 账号 %s 连续 %d 次网关 401（token 被上游判无效）→ 禁用，需重新登录",
+					logfmt.Label(uid, ""), pool.SessionDeadThreshold())
+			}
+			return
+		}
 		h.cfg.Pool.NoteSessionDead(uid)
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：
@@ -2096,6 +2121,8 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 图片是否可识别与账号健康无关，不该由账号池承担代价。
 	case upstream.ErrBadParams:
 		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
+	case upstream.ErrUpstreamBusy:
+		// 6021 queue.full 渠道级容量满载：不冷却、不熔断、不喂连败。
 		// 有问题（网关截断已由 413 消灭，剩余为客户端畸形 JSON）。换了账号照样 400，
 		// 不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇）。**11101 不轮转**
 		// ——chatCompletions 已直接透传原文返回 400（吸收上游 PR #99，见该处分支注释）。

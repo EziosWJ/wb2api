@@ -71,9 +71,10 @@ var contextCapFallback = map[string]contextCap{
 	"hy4-preview-x":     {context: 1000000, maxOutput: 64000}, // 实测外推（1M）；输出同族 hy4-preview 估算
 
 	// ---- DeepSeek 家族 ----
-	"deepseek-v4-pro":     {context: 1000000, maxOutput: 384000}, // 实测（CN 1M；models.dev 共识 1M/384000）
-	"deepseek-v4-flash":   {context: 1000000, maxOutput: 384000}, // 实测（CN 1M；models.dev 共识 1M/384000）
-	"deepseek-v4.1-flash": {context: 1000000, maxOutput: 384000}, // 实测外推 + models.dev 共识 1M/384000
+	"deepseek-v4-pro":          {context: 1000000, maxOutput: 384000}, // 实测（CN 1M；models.dev 共识 1M/384000）
+	"deepseek-v4-flash":        {context: 1000000, maxOutput: 384000}, // 实测（CN 1M；models.dev 共识 1M/384000）
+	"deepseek-v4.1-flash":      {context: 1000000, maxOutput: 384000}, // 实测外推 + models.dev 共识 1M/384000
+	"deepseek-v4.1-flash-1017": {context: 1000000, maxOutput: 384000}, // 1017 版本快照别名（同 deepseek-v4.1-flash）
 
 	// ---- OpenAI / Google（global 域家族）----
 	"gpt-6-astra":      {context: 1050000, maxOutput: 128000}, // models.dev（全 provider 一致 1050000/128000）

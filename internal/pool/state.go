@@ -27,6 +27,11 @@ func (p *Pool) Disable(uid, reason string) {
 // 即使账号已 disabled，计数仍累计并返回 false 前 N-1 次——但 keepalive 会跳过
 // disabled 号，实际只有「已 disabled 后复活且计数未清」这类场景才会走到这里。
 func (p *Pool) NoteSessionDead(uid string) bool {
+	return p.NoteSessionDeadWith(uid, sessionDeadReason)
+}
+
+// NoteSessionDeadWith 同 NoteSessionDead，但允许指定持久化 reason（区分 12153 与网关 401）。
+func (p *Pool) NoteSessionDeadWith(uid, reason string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
@@ -39,7 +44,7 @@ func (p *Pool) NoteSessionDead(uid string) bool {
 		return false
 	}
 	e.sessionDeadFails = 0
-	p.disableLocked(e, sessionDeadReason)
+	p.disableLocked(e, reason)
 	return true
 }
 

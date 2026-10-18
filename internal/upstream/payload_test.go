@@ -93,9 +93,10 @@ func TestNormalizeRoles(t *testing.T) {
 
 func TestPrepareBodyOptWithEfforts(t *testing.T) {
 	efforts := map[string][]string{
-		"glm-5.2":      {"off", "low", "high"},
-		"glm-5.2-mini": {"low", "medium"},
-		"glm-5.2-max":  {"high", "xhigh"},
+		"glm-5.2":             {"off", "low", "high"},
+		"glm-5.2-mini":        {"low", "medium"},
+		"glm-5.2-max":         {"high", "xhigh"},
+		"deepseek-v4.1-flash": {"low", "high", "max"},
 	}
 	cases := []struct {
 		name    string
@@ -122,6 +123,8 @@ func TestPrepareBodyOptWithEfforts(t *testing.T) {
 			`{"model":"glm-5.2-mini","messages":[]}`, efforts, "", ""},
 		{"nil efforts map passes through",
 			`{"model":"glm-5.2","reasoning_effort":"max"}`, nil, "reasoning_effort", "max"},
+		{"nearest effort upgrades medium to high on deepseek-v4.1-flash",
+			`{"model":"deepseek-v4.1-flash","reasoning_effort":"medium"}`, efforts, "reasoning_effort", "high"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

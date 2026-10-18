@@ -79,7 +79,7 @@ func promoteReasoningParts(obj map[string]any) int {
 				kept = append(kept, p)
 				continue
 			}
-			if typ, _ := part["type"].(string); !strings.EqualFold(strings.TrimSpace(typ), "reasoning") {
+			if typ, _ := part["type"].(string); !isReasoningPartType(typ) {
 				kept = append(kept, p)
 				continue
 			}
@@ -111,15 +111,20 @@ func promoteReasoningParts(obj map[string]any) int {
 	return convertedMsgs
 }
 
-// hasReasoningPart 报告 content 数组里是否含 reasoning part。
-// 判定与 promoteReasoningParts 的移除口径一致（type 大小写/空白不敏感）。
+// isReasoningPartType 识别 assistant content 数组中的思考片段类型（reasoning / reasoning_text）。
+func isReasoningPartType(typ string) bool {
+	t := strings.ToLower(strings.TrimSpace(typ))
+	return t == "reasoning" || t == "reasoning_text"
+}
+
+// hasReasoningPart 报告 content 数组里是否含 reasoning / reasoning_text part。
 func hasReasoningPart(parts []any) bool {
 	for _, p := range parts {
 		part, ok := p.(map[string]any)
 		if !ok {
 			continue
 		}
-		if typ, _ := part["type"].(string); strings.EqualFold(strings.TrimSpace(typ), "reasoning") {
+		if typ, _ := part["type"].(string); isReasoningPartType(typ) {
 			return true
 		}
 	}

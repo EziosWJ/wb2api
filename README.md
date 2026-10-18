@@ -15,7 +15,7 @@
 | 功能 | 当前行为 |
 |---|---|
 | Fill First 填充优先 | 配置 `pool.pick_mode=sequential`，按账号顺序使用，在途满额或不可用时切换下一账号；面板支持拖动排序，并保留最近到期积分优先的处理。默认仍为 `weighted` 加权模式 |
-| 无前缀模型路由 | `/v1/models` 默认输出裸模型名。根据目录判断模型所属区域：国内独有走国内、国际独有走国际，两边共有才按区域优先级选择；显式 `cn:` / `global:` 仍有效 |
+| 无前缀模型路由 | `/v1/models` 默认输出裸模型名，并兼容 `deepseek-v4.1-flash-1017` 别名与 1017 原生多模态能力。根据目录判断模型所属区域：国内独有走国内、国际独有走国际，两边共有才按区域优先级选择；显式 `cn:` / `global:` 仍有效 |
 | 国内与国际分区 | 账号显示所属区域，模型页面可分别查询国内和国际目录；测试对话按所选账号区域加载模型 |
 | DeepSeek 分阶段回退 | 无前缀 4.1 走国际区时，按国际免费 `deepseek-v4.1-flash` → 国际 `deepseek-v4.1-flash-sg` → 国内同名 4.1 的顺序回退。SG 和国内阶段均要求已知余额高于保留积分线；国内 4.1 按积分计费 |
 | 每账号、每模型每日 Token 限额 | 在账号行“模型用量 / 限额”分别设置，如 `100M`；北京时间零点重置，输入与输出合计，含缓存输入；`0` 表示不限 |
@@ -27,7 +27,7 @@
 | 配置持久化 | 容器配置保存在 `/app/data/config.json`；面板支持在线保存，启动期参数会提示需要重启 |
 | 工具调用兼容 | 适配工具调用历史、配对与空名称清理、推理字段，以及流式与非流式响应 |
 
-功能随版本更新，具体变更见 [Releases](https://github.com/csszyft/wb2api/releases)。`v1.9.40` 增加模型分区路由，`v1.9.41` 修复国际 DeepSeek 免费额度与 SG 均耗尽后，无前缀请求无法继续回退国内同名模型的问题。
+功能随版本更新，具体变更见 [Releases](https://github.com/csszyft/wb2api/releases)。`v1.9.41` 修复国际 DeepSeek 免费额度与 SG 均耗尽后的国内回退，`v1.9.42` 补齐 `deepseek-v4.1-flash`（1017 版本）原生多模态能力、模型别名映射、思考档位就近匹配与上游队列满载保护。
 
 ## 快速开始
 
@@ -44,7 +44,7 @@ docker compose pull
 docker compose up -d
 ```
 
-仓库中的 [docker-compose.yml](docker-compose.yml) 使用已构建的 `ghcr.io/csszyft/wb2api:latest`，**无需本地编译，也无需先复制 config.example.json**。需要固定版本时，将 Compose 的 `image` 改为 `ghcr.io/csszyft/wb2api:v1.9.41`。
+仓库中的 [docker-compose.yml](docker-compose.yml) 使用已构建的 `ghcr.io/csszyft/wb2api:latest`，**无需本地编译，也无需先复制 config.example.json**。需要固定版本时，将 Compose 的 `image` 改为 `ghcr.io/csszyft/wb2api:v1.9.42`。
 
 首次启动会在宿主机 `./data/config.json` 生成配置和随机 `api_key`。打开该文件查看密钥，然后访问：
 
@@ -75,7 +75,7 @@ docker run -d --name wb2api \
   -e WB2A_AUTH_DIR=/app/data/auths \
   -e WB2A_STATE_FILE=/app/data/state.json \
   -v "$PWD/data:/app/data" \
-  ghcr.io/csszyft/wb2api:v1.9.41
+  ghcr.io/csszyft/wb2api:v1.9.42
 ```
 
 此方式与 Compose 使用相同的数据目录和端口。容器首次以 root 进入入口脚本修正数据卷权限，再降权为 UID `10001` 运行服务。

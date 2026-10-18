@@ -89,6 +89,7 @@ func PrepareBodyOptRealmHistory(src []byte, realm string, sanitize, zeroWidth bo
 	normalizeRoles(obj)
 	normalizeToolContentParts(obj)
 	normalizeImageURL(obj)
+	normalizeStop(obj)
 	// tool 配对四步（见 tool_pairing.go）：唯一化 id → 合并背靠背调用 → 重排 → 清理孤儿。
 	// 所有模型一律执行（独立于 deepseek-only 的 sanitize 开关）。这是「让请求通过」的
 	// 安全网——不完整配对的 tool_calls/tool 结果会让上游对之后每条消息都返 400，必须
@@ -144,7 +145,7 @@ func PrepareBodyOptRealmHistory(src []byte, realm string, sanitize, zeroWidth bo
 	// 模型不支持默认档时自动落到 ≤ 默认档的最高支持档（不出站不合规档位）。
 	modelName, _ := obj["model"].(string)
 	injectThinking(obj, lookupDefaultEffort(defaultEfforts, modelName))
-	normalizeReasoningEffort(obj, efforts)
+	normalizeReasoningEffort(obj, efforts, defaultEfforts)
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
 	backfillReasoningContent(obj)
@@ -257,15 +258,25 @@ func clampGPTMinMaxTokens(obj map[string]any) {
 	}
 }
 
+// normalizeStop 把字符串形态的 stop 归一为单元素数组（上游 Go struct 仅接受 []string，
+// 字符串形态会触发 400 code=11101 Unmarshal chat params failed）。保留原始空白字符。
+func normalizeStop(obj map[string]any) {
+	s, ok := obj["stop"].(string)
+	if !ok {
+		return
+	}
+	obj["stop"] = []string{s}
+}
+
 // effortRank 档位从低到高。
 var effortRank = map[string]int{"off": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5, "max": 6}
 
-// normalizeReasoningEffort 按模型 supportedEfforts 降级 reasoning_effort（snake/camel 双字段兼容）。
+// normalizeReasoningEffort 把请求档位对齐到模型支持的档位（snake/camel 双字段兼容）。
 //   - 请求档位模型支持 → 原样透传
-//   - 请求档位不支持 → 改为 ≤请求档位的最高支持档（降级）
-//   - 支持档全部高于请求档 → 取最低支持档（偏离最小）
+//   - 请求档位不支持 → 取最近的支持档；距离相同时优先模型声明的默认档，其次偏高的一档
+//     （避免 deepseek-v4.1-flash 仅支持 low/high/max 时把客户端默认的 medium 降成 low）
 //   - 未知模型/未知档位/未携带字段/模型未缓存 → 一律透传
-func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string) {
+func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string, defaultEfforts map[string]string) {
 	if len(efforts) == 0 {
 		return
 	}
@@ -294,32 +305,36 @@ func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string) {
 	if !known {
 		return
 	}
-	// 在 ≤请求档位的支持档里选最高档；命中且与请求不同才改写。
-	best, bestIdx := "", -1
+	def := strings.ToLower(strings.TrimSpace(lookupDefaultEffort(defaultEfforts, model)))
+	best, bestIdx, bestDist := "", -1, 1<<30
 	for _, s := range supported {
 		idx, k := effortRank[strings.TrimSpace(strings.ToLower(s))]
-		if k && idx <= reqIdx && idx > bestIdx {
-			best, bestIdx = s, idx
+		if !k {
+			continue
 		}
-	}
-	if best != "" {
-		if !strings.EqualFold(best, reqStr) {
-			obj[key] = best
-			log.Printf("reasoning_effort downgraded model=%s %s -> %s", model, reqStr, best)
+		dist := idx - reqIdx
+		if dist < 0 {
+			dist = -dist
 		}
-		return
-	}
-	// 支持档全部高于请求档：取最低支持档。
-	lowest, lowestIdx := "", 1<<30
-	for _, s := range supported {
-		idx, k := effortRank[strings.TrimSpace(strings.ToLower(s))]
-		if k && idx < lowestIdx {
-			lowest, lowestIdx = s, idx
+		if dist > bestDist {
+			continue
 		}
+		if dist == bestDist {
+			curDef := def != "" && strings.EqualFold(strings.TrimSpace(s), def)
+			bestDef := def != "" && strings.EqualFold(best, def)
+			switch {
+			case curDef && !bestDef:
+			case curDef == bestDef && idx > bestIdx:
+			default:
+				continue
+			}
+		}
+		best, bestIdx, bestDist = s, idx, dist
 	}
-	if lowest != "" {
-		obj[key] = lowest
-		log.Printf("reasoning_effort floored model=%s %s -> %s", model, reqStr, lowest)
+	if best != "" && !strings.EqualFold(best, reqStr) {
+		obj[key] = best
+		log.Printf("reasoning_effort adjusted model=%s %s -> %s（模型支持 %s）",
+			model, reqStr, best, strings.Join(supported, ","))
 	}
 }
 
