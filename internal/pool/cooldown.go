@@ -59,6 +59,46 @@ func (p *Pool) SetCredits(uid string, credits, total int64) {
 	}
 }
 
+const (
+	modelBusyBase       = 60 * time.Second
+	modelBusyMax        = 3 * time.Minute
+	modelBusyReasonCode = "14003"
+)
+
+// CooldownModelBusy 把 (账号, 模型) 停一个短窗口（14003 模型繁忙专用，60s 起、封顶 3m）。
+func (p *Pool) CooldownModelBusy(uid, model, reason string) {
+	if uid == "" || model == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	now := time.Now()
+	if old, exists := e.modelCooldowns[model]; exists && old.Until.After(now) {
+		return
+	}
+	if e.modelCooldowns == nil {
+		e.modelCooldowns = map[string]modelCooldown{}
+	}
+	hits := e.modelCooldowns[model].Hits + 1
+	d := modelBusyBase
+	for i := 1; i < hits && d < modelBusyMax; i++ {
+		d *= 2
+	}
+	if d > modelBusyMax {
+		d = modelBusyMax
+	}
+	e.modelCooldowns[model] = modelCooldown{
+		Until:  now.Add(d),
+		Reason: reason,
+		Hits:   hits,
+	}
+	p.dirty.Store(true)
+}
+
 // SetCreditsDetailed 一次性原子写入余额/总额 + 快过架子集（供测试与需要同时落三者的
 // 调用方使用）。expiring 会被钳到 [0, credits]：上游分桶异常时不污染权重。
 //

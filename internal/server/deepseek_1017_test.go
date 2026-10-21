@@ -75,3 +75,42 @@ func TestQueueFull6021FailsFastWithoutPenalty(t *testing.T) {
 		t.Fatalf("6021 queue.full penalized healthy account: %+v", st)
 	}
 }
+
+func TestModelBusy14003AndPermission11158AreModelScoped(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if authz == "Bearer at-bad" {
+			return 429, `{"code":14003,"msg":"too many requests","displayMsg":{"zh":"模型繁忙，请换模型或稍后重试"}}`, false
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("bad", 2000, 0)
+	p.SetCredits("good", 1000, 0)
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: 600 * time.Second})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	st, _ := p.Status("bad")
+	if st.Cooling || len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.2" {
+		t.Fatalf("14003 should only park model, not whole account: %+v", st)
+	}
+	if p.PickByUIDForModel("bad", "hy3") == nil || p.PickByUIDForModel("bad", "glm-5.2") != nil {
+		t.Fatal("14003 model exemption failed")
+	}
+
+	up11158 := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 400, `{"code":11158,"msg":"model [gpt-5.6-sol] is not allowed for user type [personal_free_user]"}`, false
+	})
+	p2 := testPoolWith(&auth.Auth{UID: "g1", Domain: "www.workbuddy.ai", AccessToken: "at-g1", ExpiresAt: 9999999999})
+	h2 := NewHandler(Config{Pool: p2, Upstream: up11158, GlobalEnabled: true})
+	rec2 := httptest.NewRecorder()
+	h2.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"global:gpt-5.6-sol","messages":[]}`)))
+	if rec2.Code != http.StatusBadRequest || !strings.Contains(rec2.Body.String(), "model_unavailable") {
+		t.Fatalf("11158 should return 400 model_unavailable: code=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+}

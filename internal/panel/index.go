@@ -9,15 +9,28 @@
 package panel
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"net/http"
+	"strings"
 )
 
 //go:embed index.html
-var indexHTML []byte
+var indexHTMLRaw []byte
 
 //go:embed app.js
 var appJS []byte
+
+func scriptFingerprint(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
+}
+
+var indexHTML = func() []byte {
+	s := strings.ReplaceAll(string(indexHTMLRaw), `src="app.js"`, `src="app.js?v=`+scriptFingerprint(appJS)+`"`)
+	return []byte(s)
+}()
 
 // csp 内容安全策略（严格版，无需 unsafe-inline）：
 //   - default-src 'none'        默认全禁，逐个开口

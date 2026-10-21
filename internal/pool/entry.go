@@ -2,7 +2,6 @@
 package pool
 
 import (
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -387,8 +386,8 @@ func (e *entry) modelRateLimitUntil(now time.Time, reqModel string) time.Time {
 	if !ok {
 		return time.Time{}
 	}
-	if strings.HasPrefix(mc.Reason, modelBlockedReasonPrefix) {
-		return time.Time{} // 11102 模型不存在：不是限流，不参与 Retry-After
+	if isModelBlockedReason(mc.Reason) {
+		return time.Time{} // 11102/11158 模型不存在或无权限：不是限流，不参与 Retry-After
 	}
 	if mc.Until.IsZero() || !now.Before(mc.Until) {
 		return time.Time{}

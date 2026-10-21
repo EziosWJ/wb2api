@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -285,10 +286,8 @@ var softRateResetLoc = time.FixedZone("UTC+8", 8*60*60)
 // SoftRateResetLoc 暴露重置时间的固定时区（供测试构造/断言同一时区口径）。
 func SoftRateResetLoc() *time.Location { return softRateResetLoc }
 
-// modelRateLimitCode 明确指向「模型级 429 限流」的业务 code。
-// 上游用它表达"该模型的使用量超限"（code 6004，msg 带「将在 … 重置」），
-// 而不是账号整体被限流——账号健康，只是这个模型此刻被限（issue #31）。
-const modelRateLimitCode = "6004"
+const modelRateLimitCodes = "6004|14003"
+const modelBusyCode = "14003"
 
 // softRateResetReCN 中文文案（CN 主站）匹配「将在 … 重置」，捕获中间的时间串。
 var softRateResetReCN = regexp.MustCompile(`将在 (.+?) 重置`)
@@ -315,16 +314,19 @@ const softRateTimeLen = len(softRateTimeLayout)
 // softRateResetLoc 解释，不依赖容器时区）。
 const softRateUTCSuffix = "UTC+8"
 
-// modelRateLimitRe 包级预编译（选号/冷却热路径，不在函数体内 MustCompile）。
-// `"code":6004` / `"code": 6004` / `"code":"6004"` 均可命中（JSON 空格容差）。
-var modelRateLimitRe = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
+var (
+	modelRateLimitRe = regexp.MustCompile(`"code"\s*:\s*"?(?:` + modelRateLimitCodes + `)"?`)
+	modelBusyRe      = regexp.MustCompile(`"code"\s*:\s*"?` + modelBusyCode + `"?`)
+)
 
-// IsModelRateLimit 报告 429 body 是否明确指向模型级限流（业务 code 6004）。
-// 用于区分"账号级软限流"（按账号冷却）与"模型级用量限流"（切模型即可用）。
-// 只认 code 字段（数字/字符串双形态），与文案语言无关：英文 body 里 code 仍是
-// 数字 6004，同样命中。
+// IsModelRateLimit 报告 429 body 是否明确指向模型级限流（业务 code 6004 / 14003）。
 func IsModelRateLimit(body string) bool {
 	return modelRateLimitRe.MatchString(body)
+}
+
+// IsModelBusy 报告 body 是否为 14003「模型繁忙」（无恢复墙钟，走短窗口模型级停车）。
+func IsModelBusy(body string) bool {
+	return modelBusyRe.MatchString(body)
 }
 
 // normalizeSoftRateResetTime 规整正则捕获到的时间串：剥掉尾随标点与 ` UTC+8` 后缀。
@@ -349,41 +351,55 @@ func normalizeSoftRateResetTime(s string) string {
 
 // modelBlockCode 明确指向「该后端无此模型」的业务 code（上游 11102）。
 const modelBlockCode = "11102"
+const modelForbiddenCode = "11158"
 
 // modelBlockMsgMarker 11102 答复的确定性文案（官方 error message 固定短语）。
 // 只收这个窄短语，不收 "model ... not found" 宽正则——后者会误伤其他业务的
 // not found 措辞（宁缺毋滥）。
 const modelBlockMsgMarker = "service info not found"
+const modelForbiddenMsgMarker = "is not allowed for user type"
 
 // ModelBlockReason 11102 负缓存条目在 pool.modelCooldowns 里的 reason 前缀。
 // handler 写 BlockModelBackoff；pool.BlockModelClear 按 "11102" 前缀识别条目
 // （与 6004 条目的 "6004 model rate limit" reason 互不干扰，两者共存于同一 map 键）。
 const ModelBlockReason = "11102 model not available"
+const ModelForbiddenReason = "11158 model not allowed for account type"
 
-// IsModelBlocked 报告 body 是否是「该后端无此模型」(11102) 的确定性答复。
-//
-// 只比对 code/msg 等独立字段，绝不做整段文本子串匹配：错误体还带 requestId 等字段，
-// 拿整段文本匹配会把 "11102" 撞在 ID 上、误避让一个本来能用的模型。判定 = code 字段
-// 精确等于 "11102"，或 msg/message 字段命中窄短语 "service info not found"（任一命中
-// 即真）。只看 400/404：429 带 11102 属限流语义（不在此判定范围）。字段遍历覆盖顶层
-// 与 error 子对象两层（对齐上游 OpenAI 风格信封的 error 嵌套形态）。
+// IsModelBlocked 报告 body 是否是「该后端无此模型」(11102) 或「该账号类型无权使用该模型」(11158)。
 func IsModelBlocked(status int, body string) bool {
 	if (status != http.StatusBadRequest && status != http.StatusNotFound) || body == "" {
 		return false
 	}
-	// 轻量预检：body 既无 "11102" 又无 marker 时直接短路（大多数 4xx 零分配返回）。
-	if !strings.Contains(body, modelBlockCode) && !strings.Contains(strings.ToLower(body), modelBlockMsgMarker) {
+	lower := strings.ToLower(body)
+	if !strings.Contains(body, modelBlockCode) && !strings.Contains(body, modelForbiddenCode) &&
+		!strings.Contains(lower, modelBlockMsgMarker) && !strings.Contains(lower, modelForbiddenMsgMarker) {
 		return false
 	}
+	code, msg := modelBlockFields(body)
+	if code == modelBlockCode || code == modelForbiddenCode {
+		return true
+	}
+	lowerMsg := strings.ToLower(msg)
+	return strings.Contains(lowerMsg, modelBlockMsgMarker) || strings.Contains(lowerMsg, modelForbiddenMsgMarker)
+}
+
+func ModelBlockReasonFor(body string) string {
+	code, msg := modelBlockFields(body)
+	if code == modelForbiddenCode || strings.Contains(strings.ToLower(msg), modelForbiddenMsgMarker) {
+		return ModelForbiddenReason
+	}
+	return ModelBlockReason
+}
+
+func modelBlockFields(body string) (code, msg string) {
 	var root map[string]any
 	if err := json.Unmarshal([]byte(body), &root); err != nil {
-		return false
+		return "", ""
 	}
 	nodes := []map[string]any{root}
 	if inner, ok := root["error"].(map[string]any); ok {
 		nodes = append(nodes, inner)
 	}
-	code, msg := "", ""
 	for _, node := range nodes {
 		for _, key := range []string{"code", "errCode", "error_code"} {
 			if v, ok := node[key]; ok && v != nil && code == "" {
@@ -396,10 +412,7 @@ func IsModelBlocked(status int, body string) bool {
 			}
 		}
 	}
-	if code == modelBlockCode {
-		return true
-	}
-	return strings.Contains(strings.ToLower(msg), modelBlockMsgMarker)
+	return code, msg
 }
 
 // hasBusinessCode 报告 JSON 错误信封里是否存在**精确等于** want 的业务码
@@ -867,6 +880,9 @@ type Client struct {
 	modelCatalogMu sync.RWMutex
 	modelCatalog   map[string]map[string]bool
 
+	refreshMu       sync.Mutex
+	refreshInFlight map[string]*refreshFlight
+
 	// sanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	// 面板保存配置时热改（SetSanitizeFingerprints），与请求路径 prepareBody 的读
 	// 属于不同 goroutine——裸 bool 在 Go 内存模型下是数据竞争，故用 atomic。
@@ -1259,6 +1275,72 @@ const refreshTokenExpiresInMax = 10 * 365 * 24 * time.Hour
 //   - 写回前重新校验快照一致性：若锁外期间另一 goroutine 已完成刷新（refreshToken
 //     已变），本次结果直接采用（新 token 已生效），不再重复写回。
 func (c *Client) RefreshToken(a *auth.Auth) error {
+	key := a.UID
+	if key == "" {
+		key = fmt.Sprintf("%p", a)
+	}
+	c.refreshMu.Lock()
+	if c.refreshInFlight == nil {
+		c.refreshInFlight = make(map[string]*refreshFlight)
+	}
+	if f, ok := c.refreshInFlight[key]; ok {
+		c.refreshMu.Unlock()
+		<-f.done
+		return f.err
+	}
+	f := &refreshFlight{done: make(chan struct{})}
+	c.refreshInFlight[key] = f
+	c.refreshMu.Unlock()
+
+	err := c.refreshTokenOnce(a)
+	if err != nil && isSessionDead(err) && adoptNewerTokensFromDisk(a) {
+		err = c.refreshTokenOnce(a)
+	}
+
+	f.err = err
+	close(f.done)
+	c.refreshMu.Lock()
+	delete(c.refreshInFlight, key)
+	c.refreshMu.Unlock()
+	return err
+}
+
+type refreshFlight struct {
+	done chan struct{}
+	err  error
+}
+
+func isSessionDead(err error) bool {
+	var ue *Error
+	return errors.As(err, &ue) && ue.Kind == ErrSessionDead
+}
+
+func adoptNewerTokensFromDisk(a *auth.Auth) bool {
+	if a.FilePath == "" {
+		return false
+	}
+	raw, err := os.ReadFile(a.FilePath)
+	if err != nil {
+		return false
+	}
+	disk, err := auth.Parse(raw)
+	if err != nil || strings.TrimSpace(disk.RefreshToken) == "" {
+		return false
+	}
+	a.Lock()
+	defer a.Unlock()
+	if disk.RefreshToken == a.RefreshToken {
+		return false
+	}
+	a.AccessToken = disk.AccessToken
+	a.RefreshToken = disk.RefreshToken
+	if disk.ExpiresAt > 0 {
+		a.ExpiresAt = disk.ExpiresAt
+	}
+	return true
+}
+
+func (c *Client) refreshTokenOnce(a *auth.Auth) error {
 	// 第 1 段（锁内）：读快照。
 	a.Lock()
 	rtSnapshot := a.RefreshToken

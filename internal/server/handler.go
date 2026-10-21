@@ -2021,6 +2021,10 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), resetAt, "429 rate limit")
 			return
 		}
+		if upstream.IsModelBusy(body) && model != "" {
+			h.cfg.Pool.CooldownModelBusy(uid, model, "14003 model busy")
+			return
+		}
 		// P1-2：body 无重置文案但带 Retry-After 头 → 冷却到该时刻（不做指数堆加，
 		// 与重置墙钟同一对齐语义）。头优先于「有界退避」，但**低于** body 重置文案
 		// （上方已 return）——文案是上游更权威的口径（Retry-After 只在无重置文案时兜底）。
@@ -2133,11 +2137,11 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 的连败喂入不经过这里）。
 		// 11101 vs 11133 的分野理由集中在 upstream.IsBadParamsBody 的注释（单一事实来源）。
 	case upstream.ErrModelBlocked:
-		// 11102「该后端无此模型」：(账号, 模型) 负缓存避让。复用 modelCooldowns 机制
+		// 11102「该后端无此模型」/ 11158「该账号类型无此模型权限」：(账号, 模型) 负缓存避让。复用 modelCooldowns 机制
 		// （与 6004 同域），写 modelCooldowns[model]，Until 为指数退避 TTL（6h 起、封顶
 		// 24h）。选号侧 healthyForModel 对该账号自动避开该模型；切模型/切账号即可用。
 		// 立即换号（本轮 continue），该账号该模型冷却，下次选号避开。
-		h.cfg.Pool.BlockModelBackoff(uid, model, upstream.ModelBlockReason)
+		h.cfg.Pool.BlockModelBackoff(uid, model, upstream.ModelBlockReasonFor(body))
 	default:
 		// 其余（ErrClient/ErrNone）：只换号不罚（防雪崩），不喂熔断。
 		// ErrClient（未知 4xx）喂连败计数（issue #114）：连续 N 次该形态失败 →

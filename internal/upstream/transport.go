@@ -140,6 +140,7 @@ func newTransport(opts TransportOpts) *http.Transport {
 		TLSHandshakeTimeout:   opts.TLSHandshakeTimeout,
 		IdleConnTimeout:       opts.IdleConnTimeout,
 		ResponseHeaderTimeout: defaultResponseHeaderTimeout,
+		Proxy:                 http.ProxyFromEnvironment,
 	}
 	if tr.TLSHandshakeTimeout <= 0 {
 		tr.TLSHandshakeTimeout = tlsHandshakeTimeout
