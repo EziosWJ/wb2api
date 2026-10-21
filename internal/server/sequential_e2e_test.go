@@ -59,13 +59,16 @@ func TestSequentialRotatesToNextAccountOn429(t *testing.T) {
 	if elapsed >= 300*time.Millisecond {
 		t.Errorf("429 切换不得退避：elapsed=%v ≥ base 300ms", elapsed)
 	}
-	// a 被冷却（"用完"语义）：下一次选号必须直接落到 b。
+	// 6004 locks only this model; Fill First selects b for the same model.
 	st, _ := p.Status("a")
-	if !st.Cooling {
-		t.Errorf("429 的号应进入冷却（until 在未来）, status=%+v", st)
+	if st.Cooling || len(st.RateLimitedModels) != 1 {
+		t.Errorf("6004 应仅冷却该模型, status=%+v", st)
 	}
-	if got := p.Pick(); got == nil || got.UID != "b" {
-		t.Errorf("a 冷却后应首选 b, got %v", got)
+	if got := p.PickExcludingForRealm(nil, "glm-5.2", ""); got == nil || got.UID != "b" {
+		t.Errorf("a 的同一模型冷却后应首选 b, got %v", got)
+	}
+	if got := p.PickExcludingForRealm(nil, "other-model", ""); got == nil || got.UID != "a" {
+		t.Errorf("其它模型应继续优先 a, got %v", got)
 	}
 }
 

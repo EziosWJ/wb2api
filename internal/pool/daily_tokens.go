@@ -218,7 +218,7 @@ func (p *Pool) deepseekFreeExhaustedLocked(now time.Time) bool {
 		}
 		n++
 		mc := e.modelCooldowns[DeepseekFreeModel]
-		quotaRateLimited := !e.modelRateLimitUntil(now, DeepseekFreeModel).IsZero() && !strings.HasPrefix(mc.Reason, modelBusyReasonCode)
+		quotaRateLimited := !e.modelRateLimitUntil(now, DeepseekFreeModel).IsZero() && !isModelBusyReason(mc.Reason)
 		if !e.dailyTokenBlocked(now, DeepseekFreeModel) && !quotaRateLimited {
 			return false
 		}

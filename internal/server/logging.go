@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -106,6 +107,7 @@ type chatStatsReader struct {
 	cacheMiss  int
 	cacheWr    int
 	hasCache   bool
+	cacheUsage map[string]any // Raw cache fields retained when later usage chunks omit them.
 	credit     float64
 	hasCredit  bool
 	pend       []byte // 已读未返回的行缓存
@@ -187,20 +189,24 @@ func (s *chatStatsReader) parseSSELine(line string) {
 			TotalTokens      *int `json:"total_tokens"`
 			// 缓存三段与真实扣费：指针区分「缺失」与「显式 0」——上游不返回这些
 			// 字段时不能当成「命中 0 个 token」（会把命中率算成 0，看起来像缓存全失效）。
-			PromptCacheHitTokens   *int     `json:"prompt_cache_hit_tokens"`
-			PromptCacheMissTokens  *int     `json:"prompt_cache_miss_tokens"`
-			PromptCacheWriteTokens *int     `json:"prompt_cache_write_tokens"`
-			Credit                 *float64 `json:"credit"`
+			PromptCacheHitTokens   json.RawMessage `json:"prompt_cache_hit_tokens"`
+			PromptCacheMissTokens  json.RawMessage `json:"prompt_cache_miss_tokens"`
+			PromptCacheWriteTokens json.RawMessage `json:"prompt_cache_write_tokens"`
+			CacheReadInputTokens   json.RawMessage `json:"cache_read_input_tokens"`
+			CachedTokens           json.RawMessage `json:"cached_tokens"`
+			PromptTokensDetails    json.RawMessage `json:"prompt_tokens_details"`
+			InputTokensDetails     json.RawMessage `json:"input_tokens_details"`
+			Credit                 *float64        `json:"credit"`
 		} `json:"usage"`
 	}
-	if json.Unmarshal([]byte(payload), &chunk) != nil || chunk.Usage == nil {
-		if json.Unmarshal([]byte(payload), &chunk) == nil && len(chunk.Error) > 0 {
-			s.errorFrame = true
-		}
+	if json.Unmarshal([]byte(payload), &chunk) != nil {
 		return
 	}
 	if len(chunk.Error) > 0 {
 		s.errorFrame = true
+	}
+	if chunk.Usage == nil {
+		return
 	}
 	if chunk.Usage.PromptTokens != nil {
 		s.hasPromptTokens = true
@@ -214,19 +220,48 @@ func (s *chatStatsReader) parseSSELine(line string) {
 		s.hasTotalTokens = true
 		s.totalTokens = *chunk.Usage.TotalTokens
 	}
-	// 缓存三段按「任一字段出现」标记有观测：上游可能只给 hit（miss/write 省略），
-	// 此时未给的字段按 0 计入是对的（上游确实没算那一段的费用）。
-	if chunk.Usage.PromptCacheHitTokens != nil {
-		s.hasCache = true
-		s.cacheHit = *chunk.Usage.PromptCacheHitTokens
+	// Observe raw usage before Stream's normalization. Keep omitted fields from
+	// earlier chunks, but never store a derived hit as a reported value.
+	remember := func(key string, raw json.RawMessage) {
+		if len(raw) == 0 {
+			return
+		}
+		var value any
+		if json.Unmarshal(raw, &value) != nil {
+			return
+		}
+		if s.cacheUsage == nil {
+			s.cacheUsage = make(map[string]any)
+		}
+		s.cacheUsage[key] = value
 	}
-	if chunk.Usage.PromptCacheMissTokens != nil {
-		s.hasCache = true
-		s.cacheMiss = *chunk.Usage.PromptCacheMissTokens
+	remember("prompt_cache_hit_tokens", chunk.Usage.PromptCacheHitTokens)
+	remember("prompt_cache_miss_tokens", chunk.Usage.PromptCacheMissTokens)
+	remember("prompt_cache_write_tokens", chunk.Usage.PromptCacheWriteTokens)
+	remember("cache_read_input_tokens", chunk.Usage.CacheReadInputTokens)
+	remember("cached_tokens", chunk.Usage.CachedTokens)
+	rememberDetails := func(key string, raw json.RawMessage) {
+		var details map[string]any
+		if len(raw) == 0 || json.Unmarshal(raw, &details) != nil {
+			return
+		}
+		value, present := details["cached_tokens"]
+		if !present {
+			return
+		}
+		if s.cacheUsage == nil {
+			s.cacheUsage = make(map[string]any)
+		}
+		s.cacheUsage[key] = map[string]any{"cached_tokens": value}
 	}
-	if chunk.Usage.PromptCacheWriteTokens != nil {
-		s.hasCache = true
-		s.cacheWr = *chunk.Usage.PromptCacheWriteTokens
+	rememberDetails("prompt_tokens_details", chunk.Usage.PromptTokensDetails)
+	rememberDetails("input_tokens_details", chunk.Usage.InputTokensDetails)
+	if s.cacheUsage != nil {
+		if s.hasPromptTokens {
+			s.cacheUsage["prompt_tokens"] = s.promptTokens
+		}
+		hit, miss, write, ok := cacheTokensFromUsage(s.cacheUsage)
+		s.cacheHit, s.cacheMiss, s.cacheWr, s.hasCache = int(hit), int(miss), int(write), ok
 	}
 	if chunk.Usage.Credit != nil {
 		s.hasCredit = true
@@ -340,40 +375,32 @@ func usageExtraFromResponse(resp map[string]any) (hit, miss, write int64, ok boo
 	if !isMap {
 		return 0, 0, 0, false, 0, false
 	}
-	read := func(key string) (int64, bool) {
-		v, present := u[key]
-		if !present {
-			return 0, false
-		}
-		switch n := v.(type) {
-		case float64:
-			return int64(n), true
-		case float32:
-			return int64(n), true
-		case int:
-			return int64(n), true
-		case int64:
-			return n, true
-		case json.Number:
-			i, err := n.Int64()
-			return i, err == nil
-		default:
-			return 0, false
-		}
-	}
-	if n, has := read("prompt_cache_hit_tokens"); has {
-		hit, ok = n, true
-	}
-	if n, has := read("prompt_cache_miss_tokens"); has {
-		miss, ok = n, true
-	}
-	if n, has := read("prompt_cache_write_tokens"); has {
-		write, ok = n, true
-	}
+	hit, miss, write, ok = cacheTokensFromUsage(u)
 	if c, has := u["credit"].(float64); has {
 		credit, hasCredit = c, true
 	}
 	return hit, miss, write, ok, credit, hasCredit
+}
+
+// Both streaming and aggregate observations use upstream's alias precedence
+// and explicit-miss derivation. Cache data must never change total usage.
+func cacheTokensFromUsage(u map[string]any) (hit, miss, write int64, ok bool) {
+	read := func(tokens float64, present bool) (int64, bool) {
+		if !present || tokens < 0 || tokens >= float64(uint64(1)<<63) || math.IsNaN(tokens) || math.IsInf(tokens, 0) {
+			return 0, false
+		}
+		return int64(tokens), true
+	}
+	if n, has := read(upstream.UsageCacheHitTokens(u)); has {
+		hit, ok = n, true
+	}
+	if n, has := read(upstream.UsageCacheMissTokens(u)); has {
+		miss, ok = n, true
+	}
+	if n, has := read(upstream.UsageCacheWriteTokens(u)); has {
+		write, ok = n, true
+	}
+	return hit, miss, write, ok
 }
 
 // obsFromResponse 由非流式聚合响应派生统计观测（缓存三段 + 扣费）。

@@ -97,6 +97,20 @@ func rotateBackoffKind(i int, ctx context.Context, kind upstream.ErrKind) bool {
 	return rotateBackoff(i, ctx)
 }
 
+const modelBusyWaitMax = 10 * time.Second
+
+// Only a short, positively jittered wait is allowed; never wake before the lock.
+func modelBusyRetryDelay(wait time.Duration) time.Duration {
+	if wait <= 0 || wait > modelBusyWaitMax {
+		return 0
+	}
+	delay := wait + time.Duration(rand.Float64()*float64(125*time.Millisecond))
+	if delay > modelBusyWaitMax {
+		return modelBusyWaitMax
+	}
+	return delay
+}
+
 // sleepCtx 可取消的等待：ctx 取消立即返回 false（客户端断连/优雅停机不必等退避
 // 睡醒），等满返回 true。d<=0 立即放行（此时仍要求 ctx 未取消，保持调用方
 // 「false 即终止轮转」的单一语义）。与 scheduler.sleepCtx 同模式（该函数未导出

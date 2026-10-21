@@ -6,13 +6,19 @@
 // 「未命中」——客户端据此显示的缓存收益全错，按命中量做的成本核算也跟着偏。
 //
 // 归一策略：先在五个已知位置里取**第一个正值**（唯一事实来源），再把该值镜像到
-// 全部别名与嵌套明细。全 0（真未命中）时零改动：不编造、不凭空建子表。
+// 全部别名与嵌套明细。命中为 0 或缺失、但 miss 与 prompt 明确存在时按差值推导；
+// 缺少这些证据时保持原值，不凭空建子表。
 package upstream
 
+import (
+	"encoding/json"
+	"math"
+)
+
 // normalizeUsageCacheAliases 把 usage 里的缓存命中别名统一为同一个值。
-// usage 为 nil 或取不到正值时原样返回（不新建字段）。
+// usage 为 nil 或没有正的命中证据时原样返回（不新建字段）。
 func normalizeUsageCacheAliases(usage map[string]any) map[string]any {
-	best, ok := bestUsageCacheHitTokens(usage)
+	best, ok := UsageCacheHitTokens(usage)
 	if !ok || best <= 0 {
 		return usage
 	}
@@ -68,30 +74,85 @@ func bestUsageCacheHitTokens(usage map[string]any) (float64, bool) {
 	return 0, false
 }
 
+// UsageCacheHitTokens prefers a positive reported hit over derived values. A
+// zero/missing hit can be derived only from an explicitly reported miss and a
+// valid prompt count; absent miss data must not be treated as zero.
+func UsageCacheHitTokens(usage map[string]any) (float64, bool) {
+	if hit, ok := bestUsageCacheHitTokens(usage); ok {
+		return hit, true
+	}
+	if miss, ok := UsageCacheMissTokens(usage); ok {
+		if prompt, ok := UsagePromptTokens(usage); ok && prompt > miss {
+			return prompt - miss, true
+		}
+	}
+	for _, value := range []any{
+		usage["prompt_cache_hit_tokens"], usage["cache_read_input_tokens"], usage["cached_tokens"],
+		usageDetailsValue(usage, "prompt_tokens_details", "cached_tokens"),
+		usageDetailsValue(usage, "input_tokens_details", "cached_tokens"),
+	} {
+		if hit, ok := nonnegativeUsageNumber(value); ok {
+			return hit, true
+		}
+	}
+	return 0, false
+}
+
+// UsagePromptTokens, UsageCacheMissTokens and UsageCacheWriteTokens preserve
+// field presence, including a genuine zero; invalid counts are not evidence.
+func UsagePromptTokens(usage map[string]any) (float64, bool) {
+	return nonnegativeUsageNumber(usage["prompt_tokens"])
+}
+
+func UsageCacheMissTokens(usage map[string]any) (float64, bool) {
+	return nonnegativeUsageNumber(usage["prompt_cache_miss_tokens"])
+}
+
+func UsageCacheWriteTokens(usage map[string]any) (float64, bool) {
+	return nonnegativeUsageNumber(usage["prompt_cache_write_tokens"])
+}
+
+func usageDetailsValue(usage map[string]any, section, key string) any {
+	details, _ := usage[section].(map[string]any)
+	return details[key]
+}
+
 // positiveUsageNumber 把 JSON number 归一为 float64；非数字或非正值 → ok=false。
 // 覆盖上游可能给出的各种数值类型（json.Unmarshal 默认 float64，其余为防御）。
 func positiveUsageNumber(value any) (float64, bool) {
+	n, ok := nonnegativeUsageNumber(value)
+	return n, ok && n > 0
+}
+
+func nonnegativeUsageNumber(value any) (float64, bool) {
+	var tokens float64
 	switch n := value.(type) {
 	case float64:
-		return n, n > 0
+		tokens = n
 	case float32:
-		v := float64(n)
-		return v, v > 0
+		tokens = float64(n)
 	case int:
-		return float64(n), n > 0
+		tokens = float64(n)
 	case int64:
-		return float64(n), n > 0
+		tokens = float64(n)
 	case int32:
-		return float64(n), n > 0
+		tokens = float64(n)
 	case uint:
-		return float64(n), n > 0
+		tokens = float64(n)
 	case uint64:
-		return float64(n), n > 0
+		tokens = float64(n)
 	case uint32:
-		return float64(n), n > 0
+		tokens = float64(n)
+	case json.Number:
+		var err error
+		tokens, err = n.Float64()
+		if err != nil {
+			return 0, false
+		}
 	default:
 		return 0, false
 	}
+	return tokens, tokens >= 0 && !math.IsNaN(tokens) && !math.IsInf(tokens, 0)
 }
 
 // cloneUsageMap 浅拷贝 usage（不改上游原 map——同一 map 可能被聚合与非流式两条

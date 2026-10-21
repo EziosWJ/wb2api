@@ -5,6 +5,7 @@ package pool
 
 import (
 	"log"
+	"strings"
 	"time"
 )
 
@@ -60,13 +61,23 @@ func (p *Pool) SetCredits(uid string, credits, total int64) {
 }
 
 const (
-	modelBusyBase       = 60 * time.Second
-	modelBusyMax        = 3 * time.Minute
+	modelBusyBase       = 10 * time.Second
+	modelBusyMax        = time.Minute
 	modelBusyReasonCode = "14003"
 )
 
-// CooldownModelBusy 把 (账号, 模型) 停一个短窗口（14003 模型繁忙专用，60s 起、封顶 3m）。
+func isModelBusyReason(reason string) bool {
+	return strings.HasPrefix(reason, modelBusyReasonCode)
+}
+
+// CooldownModelBusy uses a short model-only window when upstream gives no deadline.
 func (p *Pool) CooldownModelBusy(uid, model, reason string) {
+	p.CooldownModelBusyUntil(uid, model, time.Time{}, reason)
+}
+
+// CooldownModelBusyUntil preserves upstream deadlines and the busy classification.
+// Busy responses must not shorten or overwrite existing quota/permission locks.
+func (p *Pool) CooldownModelBusyUntil(uid, model string, resetAt time.Time, reason string) {
 	if uid == "" || model == "" {
 		return
 	}
@@ -77,13 +88,22 @@ func (p *Pool) CooldownModelBusy(uid, model, reason string) {
 		return
 	}
 	now := time.Now()
-	if old, exists := e.modelCooldowns[model]; exists && old.Until.After(now) {
-		return
+	old, exists := e.modelCooldowns[model]
+	if exists && old.Until.After(now) {
+		if resetAt.IsZero() || !isModelBusyReason(old.Reason) || !resetAt.After(old.Until) {
+			return
+		}
+		if !old.ResetAt.IsZero() && !resetAt.After(old.ResetAt) {
+			return // An unchanged capped deadline must not extend the active window.
+		}
 	}
 	if e.modelCooldowns == nil {
 		e.modelCooldowns = map[string]modelCooldown{}
 	}
-	hits := e.modelCooldowns[model].Hits + 1
+	hits := 1
+	if isModelBusyReason(old.Reason) {
+		hits = old.Hits + 1
+	}
 	d := modelBusyBase
 	for i := 1; i < hits && d < modelBusyMax; i++ {
 		d *= 2
@@ -91,10 +111,15 @@ func (p *Pool) CooldownModelBusy(uid, model, reason string) {
 	if d > modelBusyMax {
 		d = modelBusyMax
 	}
+	until := now.Add(d)
+	if !resetAt.IsZero() {
+		until = p.cappedSoftUntilLocked(now, resetAt)
+	}
 	e.modelCooldowns[model] = modelCooldown{
-		Until:  now.Add(d),
-		Reason: reason,
-		Hits:   hits,
+		Until:   until,
+		ResetAt: resetAt,
+		Reason:  reason,
+		Hits:    hits,
 	}
 	p.dirty.Store(true)
 }
@@ -202,9 +227,8 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 //   - resetAt 非零（带解析时间）→ modelCooldowns[model].Until = min(resetAt,
 //     now+softRateMax)，ResetAt 记录上游原始墙钟（台账 ResetAt）。不写 until
 //     （全账号级冷却不受模型级限流污染），切模型即可用（模型豁免）。
-//   - resetAt 零值（无时间文案）→ 有界退避：base 起按 softStreak 翻倍、封顶
-//     softRateMax，且**在软冷却中**（until 未到期）时不推进/不延长（兜底探测不再把
-//     冷却越堆越厚）。不记录模型（不豁免）。
+//   - resetAt 零值：有模型名时仍只锁该模型，窗口内重复命中不延长；
+//     模型名为空时才退回账号级有界退避。
 //
 // 与旧实现的差异：有上游重置时间时绝对不做指数堆加（旧实现无论是否命中解析时间都
 // softStreak++，退避计数被无谓污染）；无重置时间时，「冷却中兜底探测再 429」不再
@@ -224,7 +248,7 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 				ResetAt: resetAt,
 				Reason:  reason,
 			}
-		} else {
+		} else if model == "" {
 			// 无解析时间（普通软冷却）：有界退避（base 起按 softStreak 翻倍、封顶
 			// softRateMax）。注意：**在软冷却中**（until 未到期）时不推进/不延长。
 			if e.coolKind != CoolSoft || !now.Before(e.until) {
@@ -235,6 +259,23 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			e.coolKind = CoolSoft
 			e.reason = reason
 			e.modelCooldowns = nil
+		} else {
+			old := e.modelCooldowns[model]
+			if old.Until.After(now) && !isModelBusyReason(old.Reason) {
+				return
+			}
+			if e.modelCooldowns == nil {
+				e.modelCooldowns = map[string]modelCooldown{}
+			}
+			hits := 1
+			if old.Reason == reason {
+				hits = old.Hits + 1
+			}
+			e.modelCooldowns[model] = modelCooldown{
+				Until:  now.Add(p.softDurationLocked(base, hits)),
+				Reason: reason,
+				Hits:   hits,
+			}
 		}
 		p.dirty.Store(true)
 	}

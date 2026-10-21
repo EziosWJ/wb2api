@@ -10,6 +10,8 @@
 
 本仓库基于 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 持续维护，原始项目为 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)。下文的安装命令、镜像和下载链接均指向 **csszyft/wb2api**。上游更新按本仓库的路由与面板需求适配合入。
 
+截至 2026-10-22，参考上游主线为 [`73a7560`](https://github.com/linguo2625469/workbuddy2api-panel/commit/73a7560efc7a88ebd9865db4c71ae7f6d85859f8)，该仓库已于 10 月 21 日宣布停止维护。本仓库继续保留定制功能，并按需要适配已合入的修复与社区更新。
+
 ## 本仓库的改动与优化
 
 | 功能 | 当前行为 |
@@ -23,11 +25,12 @@
 | 凭证导出与迁移 | 单账号“导出凭证”及“导出全部凭证”，导出的 JSON 可重新导入 |
 | 导入及时回执 | 凭证保存、入池后立即显示结果，激活、签到和余额查询在后台处理，避免账号已添加却一直显示导入中 |
 | 模型列表超时与回退 | 查询设置超时，能力补全失败保留已有目录，企业目录失败尝试备用目录；测试弹窗立即提供默认模型 |
+| 模型繁忙与限流 | `14003` 默认只冷却该账号的该模型 10 秒；全池仅因繁忙不可选时，同一请求最多等待 10 秒后重试一次。`6004` 无恢复时间也只冷却该模型；面板分别显示繁忙、额度限流、权限不足和模型不可用 |
 | 用量和请求日志 | 展示输入、输出、缓存用量、首字延迟及请求结果，支持时间范围与筛选；可归档脱敏请求元数据 |
 | 配置持久化 | 容器配置保存在 `/app/data/config.json`；面板支持在线保存，启动期参数会提示需要重启 |
 | 工具调用兼容 | 适配工具调用历史、配对与空名称清理、推理字段，以及流式与非流式响应 |
 
-功能随版本更新，具体变更见 [Releases](https://github.com/csszyft/wb2api/releases)。`v1.9.42` 补齐 `deepseek-v4.1-flash`（1017 版本）适配，`v1.9.43` 同步上游同账号 Refresh 单飞防 12153 掉登录、14003 模型繁忙短窗口冷却、11158 Pro 权限负缓存与面板脚本指纹防缓存。
+当前版本为 `v1.9.44`，具体变更见 [Releases](https://github.com/csszyft/wb2api/releases)。本版补齐渠道拒绝分类、模型繁忙短等重试和缓存命中统计；保留 1017 模型适配、同账号 Refresh 单飞及国际免费 → SG → 国内的回退顺序。
 
 ## 快速开始
 
@@ -44,7 +47,7 @@ docker compose pull
 docker compose up -d
 ```
 
-仓库中的 [docker-compose.yml](docker-compose.yml) 使用已构建的 `ghcr.io/csszyft/wb2api:latest`，**无需本地编译，也无需先复制 config.example.json**。需要固定版本时，将 Compose 的 `image` 改为 `ghcr.io/csszyft/wb2api:v1.9.43`。
+仓库中的 [docker-compose.yml](docker-compose.yml) 使用已构建的 `ghcr.io/csszyft/wb2api:latest`，**无需本地编译，也无需先复制 config.example.json**。需要固定版本时，将 Compose 的 `image` 改为 `ghcr.io/csszyft/wb2api:v1.9.44`。
 
 首次启动会在宿主机 `./data/config.json` 生成配置和随机 `api_key`。打开该文件查看密钥，然后访问：
 
@@ -75,7 +78,7 @@ docker run -d --name wb2api \
   -e WB2A_AUTH_DIR=/app/data/auths \
   -e WB2A_STATE_FILE=/app/data/state.json \
   -v "$PWD/data:/app/data" \
-  ghcr.io/csszyft/wb2api:v1.9.43
+  ghcr.io/csszyft/wb2api:v1.9.44
 ```
 
 此方式与 Compose 使用相同的数据目录和端口。容器首次以 root 进入入口脚本修正数据卷权限，再降权为 UID `10001` 运行服务。

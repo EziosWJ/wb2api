@@ -845,9 +845,8 @@ func TestChat6004EnglishResetCoolsToParsedTime(t *testing.T) {
 	}
 }
 
-// TestChat6004WithoutResetFallsBackToBackoff 6004 无时间文案 → 退回 600s 基数软冷却
-// （现状不变）。
-func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
+// 6004 without a reset still isolates this model, leaving other models usable.
+func TestChat6004WithoutResetStaysModelScoped(t *testing.T) {
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls++
@@ -870,12 +869,15 @@ func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("bad")
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("bad should be soft cooling: %+v", st)
+	if st.Cooling || len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" {
+		t.Fatalf("6004 should cool only glm-5.3: %+v", st)
 	}
 	// 冷却时长 = 注入 soft 基数(60s)，非解析时间（无重置文案）。
-	if st.CoolRemaining <= 0 || st.CoolRemaining > 60 {
-		t.Errorf("cool_remaining_sec=%d want ~60 (soft base, not parsed)", st.CoolRemaining)
+	if wait := time.Until(st.RateLimitedModels[0].Until); wait <= 0 || wait > time.Minute {
+		t.Errorf("model cooldown=%s want ~60s", wait)
+	}
+	if p.PickByUIDForModel("bad", "hy3") == nil {
+		t.Fatal("other model was affected by 6004")
 	}
 }
 

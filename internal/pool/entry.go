@@ -386,8 +386,8 @@ func (e *entry) modelRateLimitUntil(now time.Time, reqModel string) time.Time {
 	if !ok {
 		return time.Time{}
 	}
-	if isModelBlockedReason(mc.Reason) {
-		return time.Time{} // 11102/11158 模型不存在或无权限：不是限流，不参与 Retry-After
+	if isModelBlockedReason(mc.Reason) || isModelBusyReason(mc.Reason) {
+		return time.Time{} // Missing models, permissions and temporary busy are not quota exhaustion.
 	}
 	if mc.Until.IsZero() || !now.Before(mc.Until) {
 		return time.Time{}

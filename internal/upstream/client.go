@@ -44,6 +44,7 @@ const (
 	ErrWafBlock                      // 403 + 非业务信封体（WAF 拦截页/空体）→ 账号软冷却 + 抖动退避（WAF 403 修复 P0-1）
 	ErrUpstreamBusy                  // 6021「queue.full.title」渠道级容量满载（非账号问题）→ 不罚号、不轮转，末端 503 + upstream_busy
 	ErrClient                        // 其他 4xx / 业务错误
+	ErrChannelRefused                // Request channel verification failed; account state is unchanged.
 )
 
 func (k ErrKind) String() string {
@@ -76,6 +77,8 @@ func (k ErrKind) String() string {
 		return "upstream_busy"
 	case ErrClient:
 		return "client"
+	case ErrChannelRefused:
+		return "channel_refused"
 	default:
 		return "none"
 	}
@@ -130,25 +133,139 @@ var softRateMarkers = []string{
 	"请求过于频繁", "限流",
 }
 
-var sessionDeadMarkers = []string{"Offline user session not found", "12153"}
-
 // accountFaultMarkers 账号级授权/配额故障关键词（大小写不敏感子串匹配）。
 //
 // 定位：这类错误是**账号本身状态**决定的本机故障，不是请求格式、不是临时限流、
 // 也不是内容误报——继续重试只会反复刷上游风控/配额检查，必须把该账号冷却轮换。
-//   - "request illegal"（code 11140）→ 上游 auth/auth_forbidden，账号级授权风控，
-//     需重新 OAuth 登录才能恢复，短冷却只能阻止继续送死。
 //   - code 14017（"trial not activated" / "The trial version is not yet activated"）→
 //     上游 quota/quota_not_activated，register 未完成的试用未激活账号，同样账号级。
 //
-// 注意 11140 **不能**按 code 判定：该 code 也承载模型级限流文案（"The model provider
-// is rate-limiting requests."），那种场景必须保持 ErrSoftRate（softRateMarkers 层
-// 判定，见 Classify 顺序）。故此处只收 msg 关键词 "request illegal"（auth_forbidden
-// 的真实文案）。14017 文案唯一（无软限流歧义），可安全收录。
+// "request illegal" also occurs in channel refusals. IsAccountRestricted must
+// match its business code and message together; rate-limiting variants remain soft rate.
 var accountFaultMarkers = []string{
-	"request illegal",
 	"trial not activated",
 	"trial version is not yet activated",
+}
+
+// IsAccountRestricted requires the actual account-restriction code and message.
+func IsAccountRestricted(body string) bool {
+	return authRefusalMatches(body, []string{"11140"}, []string{"request illegal"}, false)
+}
+
+// IsChannelRefused accepts historical code spellings without rewriting the body.
+// Security-policy refusals with the same code retain content-blocked semantics.
+func IsChannelRefused(body string) bool {
+	return authRefusalMatches(body, []string{"11128", "11-128", "111-28"}, []string{
+		"request illegal", "conversation id missing", "conversation id is missing",
+		"conversation_id missing", "channel verification", "channel validation",
+		"渠道校验", "通道校验", "渠道驗證", "通道驗證", "通路驗證",
+	}, true)
+}
+
+func authRefusalMatches(body string, codes, markers []string, useDisplayTips bool) bool {
+	var root map[string]any
+	if json.Unmarshal([]byte(body), &root) != nil {
+		return false
+	}
+	containsMarker := func(s string, needles []string) bool {
+		s = strings.ToLower(s)
+		for _, needle := range needles {
+			if strings.Contains(s, needle) {
+				return true
+			}
+		}
+		return false
+	}
+	var displayMatches func(any) bool
+	displayMatches = func(value any) bool {
+		switch v := value.(type) {
+		case string:
+			return containsMarker(v, markers)
+		case map[string]any:
+			for _, child := range v {
+				if displayMatches(child) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	var walk func(map[string]any, string, int) bool
+	walk = func(node map[string]any, inheritedCode string, depth int) bool {
+		if depth > 16 {
+			return false
+		}
+		code := inheritedCode
+		for _, key := range []string{"code", "errCode", "error_code"} {
+			if value, ok := node[key]; ok && value != nil {
+				code = strings.TrimSpace(fmt.Sprint(value))
+				break
+			}
+		}
+		codeMatches := false
+		for _, expected := range codes {
+			if code == expected {
+				codeMatches = true
+				break
+			}
+		}
+		if codeMatches {
+			var messages []string
+			for _, key := range []string{"msg", "message"} {
+				if text, ok := node[key].(string); ok {
+					messages = append(messages, text)
+				}
+			}
+			text := strings.Join(messages, "\n")
+			if useDisplayTips && containsMarker(text, contentBlockedMarkers) {
+				return false
+			}
+			if containsMarker(text, markers) || (useDisplayTips && displayMatches(node["displayTips"])) {
+				return true
+			}
+		}
+		// Only descend through error-envelope fields, never request IDs or arbitrary data.
+		for _, key := range []string{"error", "data", "extError"} {
+			if child, ok := node[key].(map[string]any); ok && walk(child, code, depth+1) {
+				return true
+			}
+		}
+		for _, key := range []string{"message", "msg"} {
+			if text, ok := node[key].(string); ok {
+				var original map[string]any
+				if json.Unmarshal([]byte(text), &original) == nil && walk(original, code, depth+1) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(root, "", 0)
+}
+
+func isSessionDeadBody(body string) bool {
+	if hasModelBusinessCode(body, "12153") {
+		return true
+	}
+	var root map[string]any
+	if json.Unmarshal([]byte(body), &root) != nil {
+		return strings.Contains(strings.ToLower(body), "offline user session not found")
+	}
+	var walk func(map[string]any) bool
+	walk = func(node map[string]any) bool {
+		for _, key := range []string{"message", "msg"} {
+			if text, ok := node[key].(string); ok && strings.Contains(strings.ToLower(text), "offline user session not found") {
+				return true
+			}
+		}
+		for _, key := range []string{"error", "data", "extError"} {
+			if child, ok := node[key].(map[string]any); ok && walk(child) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(root)
 }
 
 // promptTooLongMarkers 11115「prompt is too long」关键词（大小写不敏感子串匹配 +
@@ -286,7 +403,6 @@ var softRateResetLoc = time.FixedZone("UTC+8", 8*60*60)
 // SoftRateResetLoc 暴露重置时间的固定时区（供测试构造/断言同一时区口径）。
 func SoftRateResetLoc() *time.Location { return softRateResetLoc }
 
-const modelRateLimitCodes = "6004|14003"
 const modelBusyCode = "14003"
 
 // softRateResetReCN 中文文案（CN 主站）匹配「将在 … 重置」，捕获中间的时间串。
@@ -314,19 +430,53 @@ const softRateTimeLen = len(softRateTimeLayout)
 // softRateResetLoc 解释，不依赖容器时区）。
 const softRateUTCSuffix = "UTC+8"
 
-var (
-	modelRateLimitRe = regexp.MustCompile(`"code"\s*:\s*"?(?:` + modelRateLimitCodes + `)"?`)
-	modelBusyRe      = regexp.MustCompile(`"code"\s*:\s*"?` + modelBusyCode + `"?`)
-)
-
-// IsModelRateLimit 报告 429 body 是否明确指向模型级限流（业务 code 6004 / 14003）。
+// IsModelRateLimit recognizes quota throttling, independently of temporary busy.
 func IsModelRateLimit(body string) bool {
-	return modelRateLimitRe.MatchString(body)
+	return hasModelBusinessCode(body, "6004")
 }
 
-// IsModelBusy 报告 body 是否为 14003「模型繁忙」（无恢复墙钟，走短窗口模型级停车）。
+// IsModelBusy recognizes 14003 even when upstream also reports a reset deadline.
 func IsModelBusy(body string) bool {
-	return modelBusyRe.MatchString(body)
+	return hasModelBusinessCode(body, modelBusyCode)
+}
+
+// Inspect only error-envelope fields. Request IDs, model metadata and nearby
+// codes such as 140030 cannot turn a request failure into quota exhaustion.
+func hasModelBusinessCode(body, want string) bool {
+	var root map[string]any
+	if json.Unmarshal([]byte(body), &root) != nil {
+		return false
+	}
+	var walk func(map[string]any, int) bool
+	walk = func(node map[string]any, depth int) bool {
+		if depth > 16 {
+			return false
+		}
+		for _, key := range []string{"code", "errCode", "error_code"} {
+			if value, ok := node[key]; ok && value != nil {
+				if strings.TrimSpace(fmt.Sprint(value)) == want {
+					return true
+				}
+				break
+			}
+		}
+		for _, key := range []string{"error", "data", "extError"} {
+			if child, ok := node[key].(map[string]any); ok && walk(child, depth+1) {
+				return true
+			}
+		}
+		// OpenAI error.message may contain the verbatim upstream JSON envelope.
+		for _, key := range []string{"message", "msg"} {
+			if text, ok := node[key].(string); ok {
+				var original map[string]any
+				if json.Unmarshal([]byte(text), &original) == nil && walk(original, depth+1) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(root, 0)
 }
 
 // normalizeSoftRateResetTime 规整正则捕获到的时间串：剥掉尾随标点与 ` UTC+8` 后缀。
@@ -688,10 +838,14 @@ func Classify(status int, body string) ErrKind {
 	// sessionDead / accountFault 先于 status==429（原顺序已如此，此处只是跟随
 	// 429 前移保持相对次序）：账号级终态等不来自愈，限流状态码不得掩盖它们
 	// （429+14017 必须 accountFault，401+12153 混排 "rate limit" 必须 sessionDead）。
-	for _, m := range sessionDeadMarkers {
-		if strings.Contains(body, m) {
-			return ErrSessionDead
-		}
+	if isSessionDeadBody(body) {
+		return ErrSessionDead
+	}
+	if IsChannelRefused(body) {
+		return ErrChannelRefused
+	}
+	if IsAccountRestricted(body) {
+		return ErrAccountFault
 	}
 	for _, m := range accountFaultMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
@@ -714,6 +868,9 @@ func Classify(status int, body string) ErrKind {
 	// 判在通用 429 之前，避免把全池健康号逐个软冷却。
 	if IsUpstreamBusy(body) {
 		return ErrUpstreamBusy
+	}
+	if IsModelBusy(body) || IsModelRateLimit(body) {
+		return ErrSoftRate
 	}
 	// status==429 先于 hardMarkers（fork-scan-absorb T-3，本次修复点）：限流响应 body
 	// 高频携带 "quota exceeded"/"额度不足" 等跨两界措辞，hardMarkers 先判会误归

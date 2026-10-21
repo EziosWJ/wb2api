@@ -7,6 +7,7 @@ type ModelBlockStatus struct {
 	Reason  string    // 冷却原因（通常为上游原文，如 "11102 model ... not found"）
 	Until   time.Time // 最早解封时间（零值 = 上游未给重置时刻）
 	Count   int       // 因此被挡的账号数
+	HasBusy bool      // At least one active 14003 window; not a missing-model terminal.
 }
 
 // ModelBlocked 报告该模型是否在全池范围内被模型级冷却挡住。
@@ -44,6 +45,7 @@ func (p *Pool) ModelBlocked(model, realm string) ModelBlockStatus {
 		}
 		st.Count++
 		if mc, ok := e.modelCooldowns[model]; ok {
+			st.HasBusy = st.HasBusy || isModelBusyReason(mc.Reason)
 			if st.Reason == "" {
 				st.Reason = mc.Reason
 			}

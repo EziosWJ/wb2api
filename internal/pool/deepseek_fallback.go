@@ -1,7 +1,6 @@
 package pool
 
 import (
-	"strings"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -32,7 +31,7 @@ func (p *Pool) deepseekSGExhaustedLocked(now time.Time) bool {
 		}
 		n++
 		mc := e.modelCooldowns[DeepseekPaidModel]
-		quotaRateLimited := !e.modelRateLimitUntil(now, DeepseekPaidModel).IsZero() && !strings.HasPrefix(mc.Reason, modelBusyReasonCode)
+		quotaRateLimited := !e.modelRateLimitUntil(now, DeepseekPaidModel).IsZero() && !isModelBusyReason(mc.Reason)
 		if e.dailyTokenBlocked(now, DeepseekPaidModel) || quotaRateLimited {
 			continue
 		}

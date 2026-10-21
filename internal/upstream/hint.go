@@ -62,6 +62,8 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		return "rate limited by upstream; retry after reset"
 	case ErrUpstreamBusy:
 		return "upstream inference queue is full (code 6021); retry after a short backoff"
+	case ErrChannelRefused:
+		return "upstream rejected the request channel; check client headers or an intercepting proxy, then retry"
 	case ErrAccountFault:
 		return "account-level fault at upstream (auth/quota state); the gateway will rotate or disable this account"
 	case ErrSessionDead:
@@ -118,21 +120,57 @@ func FrameHintFunc(ctxFn func() HintContext) func(string) string {
 }
 
 // FrameKind 从 SSE error 帧 payload 判定 ErrKind：6004 模型级限流的流式形态
-// （IsModelRateLimit 对帧 JSON 直接命中）优先；其余取帧内 error.message 走
-// Classify（请求级 400 口径）。判不出 → ErrNone（无 hint）。
+// （IsModelRateLimit 对帧 JSON 直接命中）优先；其余保留 error.code 与 message
+// 一起分类。message 内嵌原始 JSON 错误时优先按该信封分类。
 func FrameKind(payload string) ErrKind {
-	if IsModelRateLimit(payload) {
+	if IsModelRateLimit(payload) || IsModelBusy(payload) {
 		return ErrSoftRate
 	}
 	var f struct {
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
+		Error map[string]any `json:"error"`
 	}
-	if json.Unmarshal([]byte(payload), &f) != nil || f.Error.Message == "" {
+	if json.Unmarshal([]byte(payload), &f) != nil || len(f.Error) == 0 {
 		return ErrNone
 	}
-	return Classify(http.StatusBadRequest, f.Error.Message)
+	message, _ := f.Error["message"].(string)
+	if message == "" {
+		message, _ = f.Error["msg"].(string)
+	}
+	var original map[string]any
+	if json.Unmarshal([]byte(message), &original) == nil && original != nil {
+		f.Error = original
+	}
+	// Do not turn request IDs/type fields into semantic messages for classifiers.
+	projected := frameErrorEnvelope(f.Error, 0)
+	if len(projected) == 0 {
+		return ErrNone
+	}
+	envelope, err := json.Marshal(map[string]any{"error": projected})
+	if err != nil {
+		return ErrNone
+	}
+	return Classify(http.StatusBadRequest, string(envelope))
+}
+
+// Preserve nested business errors while dropping unrelated frame metadata.
+func frameErrorEnvelope(node map[string]any, depth int) map[string]any {
+	if depth > 16 {
+		return nil
+	}
+	out := make(map[string]any)
+	for _, key := range []string{"code", "errCode", "error_code", "message", "msg", "displayTips"} {
+		if value, ok := node[key]; ok && value != nil {
+			out[key] = value
+		}
+	}
+	for _, key := range []string{"error", "data", "extError"} {
+		if child, ok := node[key].(map[string]any); ok {
+			if projected := frameErrorEnvelope(child, depth+1); len(projected) > 0 {
+				out[key] = projected
+			}
+		}
+	}
+	return out
 }
 
 // isModelParamInvalid 上游 11133 body 判定（code 11133 / extError.code=

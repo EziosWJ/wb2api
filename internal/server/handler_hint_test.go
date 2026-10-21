@@ -232,13 +232,11 @@ func TestChatHintMessageUnchangedAnchor(t *testing.T) {
 			wantHint: "model_blocked:",
 		},
 		{
-			// 无重置墙钟的 6004 → applyErrorPolicy 走**账号级** CooldownSoftRate
-			// （不写 modelCooldowns）→ 不构成「模型级冷却耗尽」，仍是 503。
-			// 带重置墙钟的 6004 才走模型级冷却（其耗尽出口是 429，见 rateexhaust_test.go）。
-			name:     "6004 软限流（无重置墙钟→账号级）末端出口",
+			// A missing reset deadline still blocks only this model.
+			name:     "6004 软限流（无重置墙钟→模型级）末端出口",
 			status:   429,
 			body:     `{"code":6004,"msg":"您的使用量已超出频率限制","requestId":"r"}`,
-			wantCode: "no_healthy_account",
+			wantCode: "model_rate_limited",
 			wantMsg: "all accounts unavailable (cooling/disabled): upstream soft_rate (http 429): " +
 				`{"code":6004,"msg":"您的使用量已超出频率限制","requestId":"r"}`,
 			wantHint: "rate limited by upstream; retry after reset",
@@ -394,7 +392,7 @@ func TestChatContentBlockedHintNoUpstreamWordNo11128(t *testing.T) {
 	}
 }
 
-// TestChatSoftRateHint 软限流末端（无重置墙钟的 6004 → 账号级冷却，末端仍 503）
+// TestChatSoftRateHint 软限流末端（无重置墙钟的 6004 → 模型级冷却，末端 429）
 // → rate limit hint + message 逐字含上游原文。
 func TestChatSoftRateHint(t *testing.T) {
 	const raw = `{"code":6004,"msg":"您的使用量已超出频率限制","requestId":"r"}`
@@ -405,9 +403,8 @@ func TestChatSoftRateHint(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
-	// 无重置墙钟 → 账号级软冷却（非模型级）→ 末端保持 503（429 只给模型级冷却耗尽）。
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("code=%d want 503 (account-level cooling terminal)", rec.Code)
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("code=%d want 429 with retry delay", rec.Code)
 	}
 	var e hintEnvelope
 	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {

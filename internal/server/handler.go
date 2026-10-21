@@ -1157,7 +1157,72 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 轮转中途面板改值不影响本请求已定的次数，避免同请求内上限漂移。
 	maxRotate := h.rotateLimit()
 	maxAttempts := maxRotate
-	for i := 0; i < maxAttempts || freeExhausted() || cnFallbackPending(); i++ {
+	busyWaited := false
+	busySource := func() bool {
+		if lastErr == nil {
+			return true
+		}
+		var ue *upstream.Error
+		return errors.As(lastErr, &ue) && ue.Kind == upstream.ErrSoftRate && upstream.IsModelBusy(ue.Msg)
+	}
+	busyScope := func() string {
+		if realmRestricted {
+			return realm
+		}
+		return ""
+	}
+	// A cheaper phase can recover while this request is rotating or sleeping.
+	// Re-enter it at most once; each phase still gets a bounded rotation budget.
+	cheaperRecoveryUsed := false
+	recoverCheaperPhase := func() bool {
+		if cheaperRecoveryUsed || wt.wrote() || !sgEligible || (!paidFallback && !cnFallback) || r.Context().Err() != nil || h.wafIP.active() {
+			return false
+		}
+		if !h.cfg.Pool.DeepseekFreeExhausted() {
+			paidFallback, cnFallback = false, false
+			bareModel, actualModel = pool.DeepseekFreeModel, "global:"+pool.DeepseekFreeModel
+		} else if cnFallback && !h.cfg.Pool.DeepseekCNFallbackReady() {
+			paidFallback, cnFallback = true, false
+			bareModel, actualModel = pool.DeepseekPaidModel, "global:"+pool.DeepseekPaidModel
+		} else {
+			return false
+		}
+		cheaperRecoveryUsed = true
+		realm, realmRestricted = "global", true
+		body = rewriteModel(body, bareModel)
+		st.model = actualModel
+		w.Header().Set("X-WB2API-Requested-Model", peek.Model)
+		w.Header().Set("X-WB2API-Actual-Model", actualModel)
+		tried = map[string]bool{}
+		lastErr = nil
+		ptlRetryUID = ""
+		releaseHeld()
+		unbindSticky()
+		log.Printf("INFO: [server] cheaper DeepSeek phase recovered; retrying %s", actualModel)
+		return true
+	}
+	retryModelBusy := func() bool {
+		if busyWaited || wt.wrote() || ptlRetryUID != "" || !busySource() || r.Context().Err() != nil || h.wafIP.active() {
+			return false
+		}
+		wait, ok := h.cfg.Pool.ModelBusyExhausted(bareModel, busyScope(), paidFallback || cnFallback)
+		delay := modelBusyRetryDelay(wait)
+		if !ok || delay == 0 {
+			return false
+		}
+		busyWaited = true
+		releaseHeld()
+		unbindSticky()
+		log.Printf("INFO: [server] model=%s temporarily busy; waiting %s for one retry", bareModel, delay.Round(time.Millisecond))
+		if !sleepCtx(r.Context(), delay) {
+			return false
+		}
+		tried = map[string]bool{}
+		lastErr = nil
+		recoverCheaperPhase()
+		return true
+	}
+	for i := 0; i < maxAttempts || freeExhausted() || cnFallbackPending() || recoverCheaperPhase() || retryModelBusy(); i++ {
 		if freeExhausted() {
 			paidFallback = true
 			bareModel, actualModel = pool.DeepseekPaidModel, "global:"+pool.DeepseekPaidModel
@@ -1186,6 +1251,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			lastErr = nil
 			maxAttempts = i + maxRotate
 			log.Printf("INFO: [server] global DeepSeek and SG unavailable; fallback to %s (reserve=%d)", actualModel, h.cfg.Pool.ReserveCredits())
+		}
+		if i >= maxAttempts {
+			maxAttempts = i + 1 // Exactly one extra attempt after a short busy wait.
 		}
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
@@ -1248,6 +1316,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if acct == nil {
+			if recoverCheaperPhase() {
+				maxAttempts = i + maxRotate + 1
+				continue
+			}
+			if retryModelBusy() {
+				maxAttempts = i + 2
+				continue
+			}
 			st.status = http.StatusServiceUnavailable
 			break
 		}
@@ -1795,6 +1871,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				msg = "invalid request parameters"
 			}
 		}
+		if ue.Kind == upstream.ErrChannelRefused {
+			code = "channel_refused"
+			if strings.TrimSpace(ue.Msg) != "" {
+				msg = ue.Msg
+			}
+		}
 		if ue.Kind == upstream.ErrWafBlock && h.wafIP.active() {
 			wafTerminal = true
 			code = "waf_ip_blocked"
@@ -1841,7 +1923,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 与 429 分支的排他：模型级冷却优先（那是更具体的终态信号，且两者不会同时成立
 		// ——被保留积分拦住的号没有模型级冷却条目）。故本分支放在 429 判定**之后**。
 		modelRateLimited := false
-		if wait, ok := h.cfg.Pool.ModelRateLimitExhausted(bareModel, scope); ok {
+		if wait, ok := h.cfg.Pool.ModelBusyExhausted(bareModel, scope, paidFallback || cnFallback); ok && busySource() {
+			modelRateLimited = true
+			status, code = http.StatusServiceUnavailable, "model_busy"
+			hint = "model is temporarily busy upstream; retry after a short backoff"
+			retryAfter = int((wait + time.Second - 1) / time.Second)
+			if lastErr == nil {
+				msg = "all eligible accounts are temporarily busy for this model"
+			}
+		} else if wait, ok := h.cfg.Pool.ModelRateLimitExhausted(bareModel, scope); ok {
 			modelRateLimited = true
 			status = http.StatusTooManyRequests
 			code = "model_rate_limited"
@@ -1876,13 +1966,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	// Model-level unavailability must not look like an empty pool. Keep 6004's
 	// existing 429/Retry-After contract; 11102 or mixed model locks return 400.
-	if !wafTerminal && !paramsTerminal && status == http.StatusServiceUnavailable && h.cfg.Pool != nil {
+	if !wafTerminal && !paramsTerminal && code != "model_busy" && status == http.StatusServiceUnavailable && h.cfg.Pool != nil {
 		scope := realm
 		if !realmRestricted {
 			scope = ""
 		}
 		block := h.cfg.Pool.ModelBlocked(bareModel, scope)
-		if block.Blocked || (ue != nil && ue.Kind == upstream.ErrModelBlocked) {
+		if !block.HasBusy && (block.Blocked || (ue != nil && ue.Kind == upstream.ErrModelBlocked)) {
 			status, code = http.StatusBadRequest, "model_unavailable"
 			msg = "model is unavailable on the eligible accounts; try another model"
 			if ue != nil && strings.TrimSpace(ue.Msg) != "" {
@@ -1900,12 +1990,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if paidFallback && lastErr == nil && status == http.StatusServiceUnavailable {
+	if paidFallback && code != "model_busy" && lastErr == nil && status == http.StatusServiceUnavailable {
 		code = "paid_fallback_unavailable"
 		msg = "free global deepseek quota exhausted; no healthy SG account with known credits above pool.reserve_credits"
 		hint = "refresh account balances or wait for free quota recovery; reserve credits are enforced"
 	}
-	if cnFallback && lastErr == nil && status == http.StatusServiceUnavailable {
+	if cnFallback && code != "model_busy" && lastErr == nil && status == http.StatusServiceUnavailable {
 		code = "cn_fallback_unavailable"
 		msg = "international DeepSeek and SG unavailable; no healthy CN account with known credits above pool.reserve_credits"
 		hint = "refresh CN account balances or wait for quota recovery; CN DeepSeek consumes credits and reserve credits are enforced"
@@ -1924,8 +2014,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if retryAfter > 0 {
-		// Retry-After 是 HTTP 标准头（秒数）：429 之外不发——503 的既有契约
-		// （no_healthy_account/waf_ip_blocked 文案 + gateway_hint）保持原样不动。
+		// Quota 429 and temporary model_busy 503 both report the retry delay.
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 	}
 	// 终态落一行 sys 日志：面板「运行日志」镜像 log 输出，此前客户端看到的
@@ -2005,31 +2094,22 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 不需要异步核查（冗余）。立即换号。
 		h.cfg.Pool.CooldownUntilTomorrow4AM(uid, "余额不足")
 	case upstream.ErrSoftRate:
-		// 统一对齐上游重置时间（重构核心）：只要 body 带「将在 … 重置」，无论业务
-		// code 是 6004 还是 11140 rate-limiting 等形态，都精确冷却到该墙钟、绝不
-		// softStreak 指数堆加。
-		//   - 模型级（6004）→ CooldownSoftForModel：写 modelCooldowns[model]，切模型
-		//     豁免（既有 issue #31 语义）。
-		//   - 账号级（非 6004）→ CooldownSoftRate：写账号级 until，不产生模型豁免
-		//     （普通账号级限流不该因切模型绕过）。
-		// 基数一律取 h.softCooldown()（热改优先），管理面板改 soft_rate 后立即生效。
-		if resetAt, ok := upstream.ParseRateReset(body); ok {
-			if upstream.IsModelRateLimit(body) {
-				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, "6004 model rate limit")
-				return
-			}
-			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), resetAt, "429 rate limit")
-			return
+		// A busy deadline remains 14003; only 6004 denotes quota exhaustion.
+		// Upstream's message deadline has priority over Retry-After headers.
+		resetAt, hasReset := upstream.ParseRateReset(body)
+		if !hasReset && uerr != nil && uerr.RetryAfter > 0 {
+			resetAt, hasReset = time.Now().Add(uerr.RetryAfter), true
 		}
 		if upstream.IsModelBusy(body) && model != "" {
-			h.cfg.Pool.CooldownModelBusy(uid, model, "14003 model busy")
+			h.cfg.Pool.CooldownModelBusyUntil(uid, model, resetAt, "14003 model busy")
 			return
 		}
-		// P1-2：body 无重置文案但带 Retry-After 头 → 冷却到该时刻（不做指数堆加，
-		// 与重置墙钟同一对齐语义）。头优先于「有界退避」，但**低于** body 重置文案
-		// （上方已 return）——文案是上游更权威的口径（Retry-After 只在无重置文案时兜底）。
-		if uerr != nil && uerr.RetryAfter > 0 {
-			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Now().Add(uerr.RetryAfter), "429 rate limit (retry-after)")
+		if upstream.IsModelRateLimit(body) && model != "" {
+			h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, "6004 model rate limit")
+			return
+		}
+		if hasReset {
+			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), resetAt, "429 rate limit")
 			return
 		}
 		// 无重置时间 → 账号级有界退避（soft_rate 基数起、softStreak 翻倍、封顶
@@ -2091,7 +2171,7 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		//     （NoteSessionDead）；11140 旧行为是**完全相同且更激进**的模式。
 		//   - 伏笔：若将来拿到真实 11140 报文能把「内容审核拦截」与「账号级封禁」
 		//     区分开，可在此再加第二层判定（审核类零动作不计数），阈值路径只服务真封禁。
-		if strings.Contains(strings.ToLower(body), "request illegal") {
+		if upstream.IsAccountRestricted(body) {
 			if h.cfg.Pool.NoteAccountFault(uid) {
 				log.Printf("chat uid=%s: 连续 %d 次 11140 request illegal — 禁用（需人工复活）",
 					uid, pool.AccountFaultThreshold())
@@ -2104,6 +2184,8 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			return
 		}
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")
+	case upstream.ErrChannelRefused:
+		// Channel verification rejects a request; it does not prove account failure.
 	case upstream.ErrServer:
 		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
 		h.cfg.Pool.NoteError(uid)
@@ -2125,8 +2207,6 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 图片是否可识别与账号健康无关，不该由账号池承担代价。
 	case upstream.ErrBadParams:
 		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
-	case upstream.ErrUpstreamBusy:
-		// 6021 queue.full 渠道级容量满载：不冷却、不熔断、不喂连败。
 		// 有问题（网关截断已由 413 消灭，剩余为客户端畸形 JSON）。换了账号照样 400，
 		// 不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇）。**11101 不轮转**
 		// ——chatCompletions 已直接透传原文返回 400（吸收上游 PR #99，见该处分支注释）。
@@ -2136,6 +2216,8 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 账号上可用性不同）；两者都绝不能喂连败：本分支零动作即天然满足（ErrClient
 		// 的连败喂入不经过这里）。
 		// 11101 vs 11133 的分野理由集中在 upstream.IsBadParamsBody 的注释（单一事实来源）。
+	case upstream.ErrUpstreamBusy:
+		// 6021 queue.full 渠道级容量满载：不冷却、不熔断、不喂连败。
 	case upstream.ErrModelBlocked:
 		// 11102「该后端无此模型」/ 11158「该账号类型无此模型权限」：(账号, 模型) 负缓存避让。复用 modelCooldowns 机制
 		// （与 6004 同域），写 modelCooldowns[model]，Until 为指数退避 TTL（6h 起、封顶
