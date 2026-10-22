@@ -1,40 +1,6 @@
-# wb2api
-
-将 WorkBuddy / CodeBuddy 国内与国际账号接入 OpenAI 兼容 API 的多账号网关，附带 Web 管理面板。
-
-[![Release](https://img.shields.io/github/v/release/csszyft/wb2api)](https://github.com/csszyft/wb2api/releases/latest)
-[![Build](https://github.com/csszyft/wb2api/actions/workflows/docker.yml/badge.svg)](https://github.com/csszyft/wb2api/actions/workflows/docker.yml)
-[![License](https://img.shields.io/github/license/csszyft/wb2api)](LICENSE)
-
-[下载程序](https://github.com/csszyft/wb2api/releases/latest) · [容器镜像](https://github.com/csszyft/wb2api/pkgs/container/wb2api) · [版本记录](https://github.com/csszyft/wb2api/releases) · [反馈问题](https://github.com/csszyft/wb2api/issues)
-
-本仓库基于 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 持续维护，原始项目为 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)。下文的安装命令、镜像和下载链接均指向 **csszyft/wb2api**。上游更新按本仓库的路由与面板需求适配合入。
-
-截至 2026-10-22，参考上游主线为 [`73a7560`](https://github.com/linguo2625469/workbuddy2api-panel/commit/73a7560efc7a88ebd9865db4c71ae7f6d85859f8)，该仓库已于 10 月 21 日宣布停止维护。本仓库继续保留定制功能，并按需要适配已合入的修复与社区更新。
-
-## 本仓库的改动与优化
-
-| 功能 | 当前行为 |
-|---|---|
-| Fill First 填充优先 | 配置 `pool.pick_mode=sequential`，按账号顺序使用，在途满额或不可用时切换下一账号；面板支持拖动排序，并保留最近到期积分优先的处理。默认仍为 `weighted` 加权模式 |
-| 无前缀模型路由 | `/v1/models` 默认输出裸模型名，并兼容 `deepseek-v4.1-flash-1017` 别名与 1017 原生多模态能力。根据目录判断模型所属区域：国内独有走国内、国际独有走国际，两边共有才按区域优先级选择；显式 `cn:` / `global:` 仍有效 |
-| 国内与国际分区 | 账号显示所属区域，模型页面可分别查询国内和国际目录；测试对话按所选账号区域加载模型 |
-| DeepSeek 分阶段回退 | 无前缀 4.1 走国际区时，按国际免费 `deepseek-v4.1-flash` → 国际 `deepseek-v4.1-flash-sg` → 国内同名 4.1 的顺序回退。SG 和国内阶段均要求已知余额高于保留积分线；国内 4.1 按积分计费 |
-| 每账号、每模型每日 Token 限额 | 在账号行“模型用量 / 限额”分别设置，如 `100M`；北京时间零点重置，输入与输出合计，含缓存输入；`0` 表示不限 |
-| 兼容多种 JSON 凭证 | 支持本程序嵌套结构、第三方常见数组与包装格式、`at` / `rt` 简写；根据域名与区域标记识别国内、国际账号，包括 `realm: "intl"` |
-| 凭证导出与迁移 | 单账号“导出凭证”及“导出全部凭证”，导出的 JSON 可重新导入 |
-| 导入及时回执 | 凭证保存、入池后立即显示结果，激活、签到和余额查询在后台处理，避免账号已添加却一直显示导入中 |
-| 模型列表超时与回退 | 查询设置超时，能力补全失败保留已有目录，企业目录失败尝试备用目录；测试弹窗立即提供默认模型 |
-| 模型繁忙与限流 | `14003` 默认只冷却该账号的该模型 10 秒；全池仅因繁忙不可选时，同一请求最多等待 10 秒后重试一次。`6004` 无恢复时间也只冷却该模型；面板分别显示繁忙、额度限流、权限不足和模型不可用 |
-| 用量和请求日志 | 展示输入、输出、缓存用量、首字延迟及请求结果，支持时间范围与筛选；可归档脱敏请求元数据 |
-| 配置持久化 | 容器配置保存在 `/app/data/config.json`；面板支持在线保存，启动期参数会提示需要重启 |
-| 工具调用兼容 | 适配工具调用历史、配对与空名称清理、推理字段，以及流式与非流式响应 |
-
-当前版本为 `v1.9.44`，具体变更见 [Releases](https://github.com/csszyft/wb2api/releases)。本版补齐渠道拒绝分类、模型繁忙短等重试和缓存命中统计；保留 1017 模型适配、同账号 Refresh 单飞及国际免费 → SG → 国内的回退顺序。
-
 ## 快速开始
 
-需要一个或多个本人授权使用的 WorkBuddy / CodeBuddy 账号。部署完成后，在面板登录或导入账号即可使用。
+需要 账号。部署完成后，在面板登录或导入账号即可使用。
 
 ### 方式一：Docker Compose
 
